@@ -225,6 +225,52 @@ std::string describeEventParameter(const Parameter& p, const ObjectNameResolver&
 
 namespace {
 
+using FrameNameResolver = std::function<std::string(int)>;
+
+// Frame-navigation ("storyboard") actions. FNaF drives frame jumps through the
+// Game object (objectType -3); System (-1) is kept for completeness.
+enum class NavKind { None, NextFrame, PreviousFrame, JumpFrame, RestartFrame, RestartApp, EndApp };
+
+struct NavAction {
+    NavKind kind = NavKind::None;
+    const char* label = nullptr;
+    bool jumpLiteral = false;    // target frame index stored in parameters[0] (Short/Int)
+    bool jumpExpression = false; // target frame is an expression
+};
+
+NavAction classifyNavAction(int16_t objectType, int16_t num) {
+    NavAction r;
+    if (objectType == -3) { // Game / storyboard controls
+        switch (num) {
+            case 0: r.kind = NavKind::NextFrame; r.label = "Next frame"; break;
+            case 2: r.kind = NavKind::JumpFrame; r.label = "Jump to frame"; r.jumpLiteral = true; break;
+            case 4: r.kind = NavKind::EndApp; r.label = "End application"; break;
+            case 8: r.kind = NavKind::JumpFrame; r.label = "Jump to frame (expression)"; r.jumpExpression = true; break;
+            default: break;
+        }
+    } else if (objectType == -1) { // System
+        switch (num) {
+            case 1: r.kind = NavKind::PreviousFrame; r.label = "Previous frame"; break;
+            case 2: r.kind = NavKind::NextFrame; r.label = "Next frame"; break;
+            case 3: r.kind = NavKind::JumpFrame; r.label = "Jump to frame"; r.jumpLiteral = true; break;
+            case 4: r.kind = NavKind::RestartFrame; r.label = "Restart current frame"; break;
+            case 5: r.kind = NavKind::RestartApp; r.label = "Restart application"; break;
+            default: break;
+        }
+    }
+    return r;
+}
+
+std::string fadeLine(const char* label, const Transition& t) {
+    std::string s = "  " + std::string(label);
+    s += asciiOnly(t.module);
+    if (!t.name.empty()) s += "/" + asciiOnly(t.name);
+    s += "  duration=" + std::to_string(t.duration);
+    if (t.flags != 0) s += "  flags=" + std::to_string(t.flags);
+    if (!t.moduleFile.empty()) s += "  file=" + quoted(t.moduleFile);
+    return s + "\n";
+}
+
 std::string flagsSuffix(int8_t flags, int8_t otherFlags) {
     if (flags == 0 && otherFlags == 0) return "";
     char buf[48];
@@ -233,12 +279,15 @@ std::string flagsSuffix(int8_t flags, int8_t otherFlags) {
     return buf;
 }
 
-std::string listingForFrame(const Frame& frame, int index, const ObjectNameResolver& resolver) {
+std::string listingForFrame(const Frame& frame, int index, const ObjectNameResolver& resolver,
+                            const FrameNameResolver& frameName) {
     std::string out;
     out += "========================================================================\n";
     out += "Frame " + std::to_string(index) + " " + quoted(frame.name) +
            "   " + std::to_string(frame.width) + "x" + std::to_string(frame.height) +
            "   groups: " + std::to_string(frame.events->groups.size()) + "\n";
+    if (frame.fadeIn) out += fadeLine("Fade-in  ", *frame.fadeIn);
+    if (frame.fadeOut) out += fadeLine("Fade-out ", *frame.fadeOut);
     out += "========================================================================\n";
 
     size_t gid = 0;
@@ -259,12 +308,77 @@ std::string listingForFrame(const Frame& frame, int index, const ObjectNameResol
         for (const auto& a : g.actions) {
             out += "  DO  " + eventObjectLabel(a.objectType, a.objectInfo, resolver) +
                    "  act #" + std::to_string(a.num) +
-                   flagsSuffix(a.flags, a.otherFlags) + "\n";
+                   flagsSuffix(a.flags, a.otherFlags);
+            NavAction nav = classifyNavAction(a.objectType, a.num);
+            if (nav.label) {
+                out += std::string("  (") + nav.label + ")";
+                if (nav.jumpLiteral && !a.parameters.empty()) {
+                    const Parameter& fp = a.parameters[0];
+                    if (fp.kind == Parameter::Kind::Short || fp.kind == Parameter::Kind::Int) {
+                        int tgt = static_cast<int>(fp.value);
+                        out += "  -> frame " + std::to_string(tgt);
+                        std::string nm = frameName ? frameName(tgt) : std::string();
+                        if (!nm.empty()) out += " " + quoted(nm);
+                    }
+                }
+            }
+            out += "\n";
             for (const auto& p : a.parameters)
                 out += "      - " + describeEventParameter(p, resolver) + "\n";
         }
     }
     return out;
+}
+
+void collectFrameTransitions(const Frame& frame, int index, const FrameNameResolver& frameName,
+                             std::string& out) {
+    std::string src = "frame " + std::to_string(index) + " " + quoted(frame.name);
+    for (const auto& g : frame.events->groups) {
+        for (const auto& a : g.actions) {
+            NavAction nav = classifyNavAction(a.objectType, a.num);
+            auto targetName = [&](int tgt) -> std::string {
+                std::string nm = frameName ? frameName(tgt) : std::string();
+                return nm.empty() ? "" : " " + quoted(nm);
+            };
+            switch (nav.kind) {
+                case NavKind::JumpFrame:
+                    if (nav.jumpLiteral && !a.parameters.empty()) {
+                        const Parameter& fp = a.parameters[0];
+                        if (fp.kind == Parameter::Kind::Short || fp.kind == Parameter::Kind::Int) {
+                            int tgt = static_cast<int>(fp.value);
+                            out += src + "  ->  frame " + std::to_string(tgt) +
+                                   targetName(tgt) + "\n";
+                        }
+                    } else if (nav.jumpExpression && !a.parameters.empty()) {
+                        out += src + "  ->  <expression: " +
+                               std::string(a.parameters[0].expression
+                                               ? a.parameters[0].expression->describe()
+                                               : "?") +
+                               ">\n";
+                    }
+                    break;
+                case NavKind::NextFrame:
+                    out += src + "  ->  frame " + std::to_string(index + 1) +
+                           targetName(index + 1) + "  (next)\n";
+                    break;
+                case NavKind::PreviousFrame:
+                    out += src + "  ->  frame " + std::to_string(index - 1) +
+                           targetName(index - 1) + "  (previous)\n";
+                    break;
+                case NavKind::RestartFrame:
+                    out += src + "  ->  <restart current frame>\n";
+                    break;
+                case NavKind::RestartApp:
+                    out += src + "  ->  <restart application>\n";
+                    break;
+                case NavKind::EndApp:
+                    out += src + "  ->  <end application>\n";
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
 }
 
 } // namespace
@@ -281,23 +395,40 @@ void EventsListing::execute(GameData& game) {
         return it != game.frameItems.end() ? it->second->name : std::string();
     };
 
+    std::vector<std::string> frameNames;
+    for (const auto& f : game.frames) frameNames.push_back(f ? f->name : std::string());
+    FrameNameResolver frameName = [&frameNames](int i) -> std::string {
+        if (i < 0 || i >= static_cast<int>(frameNames.size())) return std::string();
+        return frameNames[i];
+    };
+
     std::string all;
+    std::string transitions;
     size_t frames = 0, groups = 0;
     int index = 0;
     for (const auto& frame : game.frames) {
         if (!frame || !frame->events) { ++index; continue; }
-        std::string listing = listingForFrame(*frame, index, resolver);
+        std::string listing = listingForFrame(*frame, index, resolver, frameName);
         std::string base = std::to_string(index) + "_" +
                            (frame->name.empty() ? "unnamed" : clearName(frame->name));
         writeFileBytes(pathJoin(dir, "frame_" + base + "_events.txt"),
                        std::vector<uint8_t>(listing.begin(), listing.end()));
         all += listing + "\n";
         groups += frame->events->groups.size();
+        collectFrameTransitions(*frame, index, frameName, transitions);
         ++frames;
         ++index;
     }
     writeFileBytes(pathJoin(dir, "ALL_EVENTS.txt"),
                    std::vector<uint8_t>(all.begin(), all.end()));
+
+    std::string transitionsOut;
+    transitionsOut += "Frame transitions (" + std::to_string(frames) + " frames)\n";
+    transitionsOut += "================================================================\n";
+    transitionsOut += transitions.empty() ? "No frame-navigation actions found.\n" : transitions;
+    writeFileBytes(pathJoin(dir, "TRANSITIONS.txt"),
+                   std::vector<uint8_t>(transitionsOut.begin(), transitionsOut.end()));
+
     Logger::log("Events listing done (" + std::to_string(frames) + " frames, " +
                 std::to_string(groups) + " groups) -> " + dir);
 }

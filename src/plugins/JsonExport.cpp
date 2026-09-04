@@ -170,6 +170,35 @@ static JsonPtr parameterJson(const Parameter& p) {
     return j;
 }
 
+// Frame-navigation ("storyboard") action label; nullptr when not a nav action.
+// FNaF drives frame jumps through the Game object (objectType -3); System (-1)
+// is kept for completeness.
+static const char* storyboardActionName(int16_t objectType, int16_t num) {
+    if (objectType == -3) { // Game / storyboard controls
+        switch (num) {
+            case 0: return "Next frame";
+            case 2: return "Jump to frame";
+            case 4: return "End application";
+            case 8: return "Jump to frame (expression)";
+            default: return nullptr;
+        }
+    } else if (objectType == -1) { // System
+        switch (num) {
+            case 1: return "Previous frame";
+            case 2: return "Next frame";
+            case 3: return "Jump to frame";
+            case 4: return "Restart current frame";
+            case 5: return "Restart application";
+            default: return nullptr;
+        }
+    }
+    return nullptr;
+}
+
+static bool literalJumpAction(int16_t objectType, int16_t num) {
+    return (objectType == -3 && num == 2) || (objectType == -1 && num == 3);
+}
+
 static JsonPtr conditionJson(const Condition& c) {
     auto j = JsonValue::makeObject();
     j->set("objectType", JsonValue::makeInt(c.objectType));
@@ -186,7 +215,7 @@ static JsonPtr conditionJson(const Condition& c) {
     return j;
 }
 
-static JsonPtr actionJson(const Action& a) {
+static JsonPtr actionJson(const Action& a, const std::vector<std::string>* frameNames) {
     auto j = JsonValue::makeObject();
     j->set("objectType", JsonValue::makeInt(a.objectType));
     j->set("num", JsonValue::makeInt(a.num));
@@ -195,6 +224,18 @@ static JsonPtr actionJson(const Action& a) {
     j->set("flags", JsonValue::makeInt(a.flags));
     j->set("otherFlags", JsonValue::makeInt(a.otherFlags));
     j->set("defType", JsonValue::makeInt(a.defType));
+    if (const char* nm = storyboardActionName(a.objectType, a.num))
+        j->set("actionName", JsonValue::makeString(nm));
+    if (literalJumpAction(a.objectType, a.num) && !a.parameters.empty()) {
+        const Parameter& fp = a.parameters[0];
+        if (fp.kind == Parameter::Kind::Short || fp.kind == Parameter::Kind::Int) {
+            int tgt = static_cast<int>(fp.value);
+            j->set("targetFrame", JsonValue::makeInt(tgt));
+            if (frameNames && tgt >= 0 && tgt < static_cast<int>(frameNames->size()) &&
+                !(*frameNames)[tgt].empty())
+                j->set("targetFrameName", JsonValue::makeString((*frameNames)[tgt]));
+        }
+    }
     auto params = JsonValue::makeArray();
     for (const auto& p : a.parameters) params->push(parameterJson(p));
     j->set("parameters", std::move(params));
@@ -357,13 +398,26 @@ static JsonPtr objectJson(const ObjectInfo& oi) {
     return j;
 }
 
-static JsonPtr frameJson(const Frame& frame) {
+static JsonPtr frameJson(const Frame& frame, const std::vector<std::string>& frameNames) {
     auto j = JsonValue::makeObject();
     j->set("name", JsonValue::makeString(frame.name));
     j->set("width", JsonValue::makeInt(frame.width));
     j->set("height", JsonValue::makeInt(frame.height));
     j->set("background", colorJson(frame.background));
     j->set("flags", bitDictJson(frame.flags));
+
+    auto fadeJson = [](const Transition& t) {
+        auto fj = JsonValue::makeObject();
+        fj->set("module", JsonValue::makeString(t.module));
+        fj->set("name", JsonValue::makeString(t.name));
+        fj->set("duration", JsonValue::makeInt(t.duration));
+        fj->set("flags", JsonValue::makeInt(t.flags));
+        fj->set("color", colorJson(t.color));
+        if (!t.moduleFile.empty()) fj->set("moduleFile", JsonValue::makeString(t.moduleFile));
+        return fj;
+    };
+    if (frame.fadeIn) j->set("fadeIn", fadeJson(*frame.fadeIn));
+    if (frame.fadeOut) j->set("fadeOut", fadeJson(*frame.fadeOut));
 
     auto instances = JsonValue::makeArray();
     for (const auto& inst : frame.objects) {
@@ -411,7 +465,7 @@ static JsonPtr frameJson(const Frame& frame) {
             for (const auto& c : group.conditions) conds->push(conditionJson(c));
             gj->set("conditions", std::move(conds));
             auto acts = JsonValue::makeArray();
-            for (const auto& a : group.actions) acts->push(actionJson(a));
+            for (const auto& a : group.actions) acts->push(actionJson(a, &frameNames));
             gj->set("actions", std::move(acts));
             groups->push(std::move(gj));
         }
@@ -485,9 +539,12 @@ void JsonExportTool::execute(GameData& game) {
         if (info) objects->push(objectJson(*info));
     app->set("objects", std::move(objects));
 
+    std::vector<std::string> frameNames;
+    for (const auto& f : game.frames) frameNames.push_back(f ? f->name : std::string());
+
     auto frames = JsonValue::makeArray();
     for (const auto& frame : game.frames)
-        if (frame) frames->push(frameJson(*frame));
+        if (frame) frames->push(frameJson(*frame, frameNames));
     app->set("frames", std::move(frames));
 
     Logger::debug("serializing application.json...");
