@@ -85,8 +85,12 @@ void gradientRect(std::vector<uint8_t>& canvas, int cw, int ch,
 } // namespace
 
 void FrameReplayTool::execute(GameData& game) {
-    const std::string dir = pathJoin(Dumpers::dumpDir(game.sourcePath), "FrameReplay");
-    Dumpers::ensureDir(dir);
+    const std::string dir = pathJoin(g_dumpsDir,
+                                     sanitizeGameName(game.name.empty()
+                                                          ? "Unknown Game"
+                                                          : game.name),
+                                     "FrameReplay");
+    createDirectories(dir);
 
     int done = 0;
     for (size_t fi = 0; fi < game.frames.size(); ++fi) {
@@ -139,17 +143,16 @@ void FrameReplayTool::execute(GameData& game) {
             if (!img || img->width <= 0 || img->height <= 0) continue;
             if (img->rgba.empty()) img->decode();
 
-            uint8_t ink = common ? common->inkEffect : 0;
-            uint8_t inkV = common ? common->inkEffectValue : 0;
-            BinaryReader::Color coeff{255, 255, 255, 0};
-            if (common) coeff = common->rgbCoeff;
+            uint8_t ink = obj->inkEffect;
+            uint8_t inkV = obj->inkEffectValue;
+            BinaryReader::Color coeff = obj->rgbCoeff;
             blendCoeff(canvas, W, H, *img,
                        inst->x - img->hotX, inst->y - img->hotY, ink, inkV, coeff);
         }
 
         const std::string base = "frame_" + std::to_string(fi) + "_" +
                                  (frame.name.empty() ? std::string("unnamed")
-                                                     : Utils::clearName(frame.name));
+                                                     : clearName(frame.name));
         PngWriter::writeFile(pathJoin(dir, base + ".png"), W, H, canvas);
         Logger::log("FrameReplay: \"" +
                     (frame.name.empty() ? std::string("(unnamed)") : frame.name) +
