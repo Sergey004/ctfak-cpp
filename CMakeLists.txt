@@ -53,6 +53,7 @@ set(CTFAK_LIB_SOURCES
     src/plugins/ChunkTrace.cpp
     src/plugins/JsonExport.cpp
     src/plugins/FrameLayout.cpp
+    src/plugins/FrameReplay.cpp
     src/plugins/EventsListing.cpp
     src/plugins/DxtEncoder.cpp
     src/plugins/RecompPack.cpp
