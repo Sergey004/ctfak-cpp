@@ -278,7 +278,16 @@ void SystemCounter::read(BinaryReader& reader) {
     inverse = (flagValue & 0x0100) != 0;
     font = reader.readU16();
 
-    if (displayType == 0) return;
+    // v2.66: dt=0 counters STILL carry the glyph list — 4 pad bytes then
+    // count+frames (the F4 "hour" head proved it: ... font=0, 00 00 00 00,
+    // 0E 00, handles...). The old early-return hid every counter's font.
+    if (displayType == 0) {
+        reader.skip(4);
+        int16_t count = reader.readI16();
+        frames.resize(count);
+        for (int16_t i = 0; i < count; ++i) frames[i] = reader.readU16();
+        return;
+    }
     if (displayType == 1 || displayType == 4 || displayType == 50) {
         int16_t count = reader.readI16();
         frames.resize(count);
@@ -538,6 +547,8 @@ void ObjectCommon::readSubLoaders(BinaryReader& reader, int64_t base) {
             } else if (identifier == "TR\xFF\xFF" || identifier == "CNTR" || identifier == "CN" ||
                        identifier == "LIVE") {
                 counter = std::make_unique<SystemCounter>();
+                counter->rawHead = reader.readBytes(48);   // v2.66 diagnostic
+                reader.seek(reader.tell() - 48);
                 counter->read(reader);
             } else if (identifier == "CCA ") {
                 subApplication = std::make_unique<SubApplication>();

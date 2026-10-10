@@ -122,6 +122,7 @@ struct SystemCounter {
     uint16_t font = 0;
     std::vector<uint16_t> frames;
     Shape shape;
+    std::vector<uint8_t> rawHead;   // v2.66 diagnostic: the CNTR block head
     void read(BinaryReader& reader);
 };
 

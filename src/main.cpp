@@ -138,6 +138,41 @@ static bool loadGame(const std::string& path, GameData& game) {
             for (size_t fi = 0; fi < game.frames.size(); ++fi)
                 std::cout << "file[" << fi << "] \"" << (game.frames[fi] ? game.frames[fi]->name : std::string("?")) << "\"\n";
         }
+        if (getenv("CTFAK_DUMP_EXT")) {
+            // v2.66: the per-object extension payloads (the Perspective
+            // extension's serialized EDATA lives here) + the counter glyph
+            // bindings (the CNTR raw head — where a counter's picture list
+            // hides when the JSON shows frames: []).
+            std::cout << "=== object extensions ===\n";
+            for (const auto& kv : game.frameItems) {
+                const auto& oi = kv.second;
+                if (!oi || !oi->common) continue;
+                if (!oi->common->extension.data.empty()) {
+                    std::cout << "obj " << kv.first << " \"" << oi->name << "\" extId="
+                              << oi->common->extension.id << " size="
+                              << oi->common->extension.data.size() << " :";
+                    char hex[8];
+                    for (size_t b = 0; b < oi->common->extension.data.size() && b < 96; ++b) {
+                        std::snprintf(hex, sizeof(hex), " %02X", oi->common->extension.data[b]);
+                        std::cout << hex;
+                    }
+                    std::cout << "\n";
+                }
+                if (oi->common->counter) {
+                    std::cout << "obj " << kv.first << " \"" << oi->name << "\" CNTR id=\""
+                              << oi->common->identifier << "\" dt="
+                              << oi->common->counter->displayType << " frames=";
+                    for (uint16_t f : oi->common->counter->frames) std::cout << f << ",";
+                    std::cout << " head:";
+                    char hex[8];
+                    for (size_t b = 0; b < oi->common->counter->rawHead.size(); ++b) {
+                        std::snprintf(hex, sizeof(hex), " %02X", oi->common->counter->rawHead[b]);
+                        std::cout << hex;
+                    }
+                    std::cout << "\n";
+                }
+            }
+        }
         return true;
     }
 
