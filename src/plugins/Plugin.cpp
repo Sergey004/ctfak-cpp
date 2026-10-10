@@ -4,6 +4,7 @@
 #include "JsonExport.h"
 #include "FrameLayout.h"
 #include "EventsListing.h"
+#include "RecompPack.h"
 #include <memory>
 
 namespace ctfak {
@@ -21,6 +22,7 @@ std::vector<FusionTool*>& builtinTools() {
         tools.push_back(new JsonExportTool());
         tools.push_back(new FrameLayoutRenderer());
         tools.push_back(new EventsListing());
+        tools.push_back(new RecompPack());   // tool #10: .pak repacker (was never registered)
         initialized = true;
     }
     return tools;

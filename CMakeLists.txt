@@ -54,6 +54,8 @@ set(CTFAK_LIB_SOURCES
     src/plugins/JsonExport.cpp
     src/plugins/FrameLayout.cpp
     src/plugins/EventsListing.cpp
+    src/plugins/DxtEncoder.cpp
+    src/plugins/RecompPack.cpp
 )
 
 add_library(ctfak_core STATIC ${CTFAK_LIB_SOURCES})

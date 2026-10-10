@@ -126,6 +126,18 @@ static bool loadGame(const std::string& path, GameData& game) {
         }
         game.sourcePath = path;
         game.read(reader);
+        if (getenv("CTFAK_DUMP_HANDLES")) {
+            std::cout << "=== storyboard frameHandles (" << game.frameHandles.size() << ") ===\n";
+            for (size_t i = 0; i < game.frameHandles.size(); ++i) {
+                int16_t h = game.frameHandles[i];
+                int fileIdx = (h >= 0 && (size_t)h < game.frames.size()) ? h : -1;
+                std::string nm = (fileIdx >= 0) ? game.frames[fileIdx]->name : std::string("?");
+                std::cout << "slot " << i << " -> " << h << " -> file[" << fileIdx << "] \"" << nm << "\"\n";
+            }
+            std::cout << "=== file order frames ===\n";
+            for (size_t fi = 0; fi < game.frames.size(); ++fi)
+                std::cout << "file[" << fi << "] \"" << (game.frames[fi] ? game.frames[fi]->name : std::string("?")) << "\"\n";
+        }
         return true;
     }
 
@@ -137,6 +149,18 @@ static bool loadGame(const std::string& path, GameData& game) {
     BinaryReader reader(file.data(), file.size());
     reader.seek(start);
     game.read(reader);
+    if (getenv("CTFAK_DUMP_HANDLES")) {
+        std::cout << "=== storyboard frameHandles (" << game.frameHandles.size() << ") ===\n";
+        for (size_t i = 0; i < game.frameHandles.size(); ++i) {
+            int16_t h = game.frameHandles[i];
+            int fileIdx = (h >= 0 && (size_t)h < game.frames.size()) ? h : -1;
+            std::string nm = (fileIdx >= 0) ? game.frames[fileIdx]->name : std::string("?");
+            std::cout << "slot " << i << " -> " << h << " -> file[" << fileIdx << "] \"" << nm << "\"\n";
+        }
+        std::cout << "=== file order frames ===\n";
+        for (size_t fi = 0; fi < game.frames.size(); ++fi)
+            std::cout << "file[" << fi << "] \"" << (game.frames[fi] ? game.frames[fi]->name : std::string("?")) << "\"\n";
+    }
     return true;
 }
 
