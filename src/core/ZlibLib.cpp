@@ -1,4 +1,5 @@
 #include "ZlibLib.h"
+#include "Logger.h"
 
 #include <stdexcept>
 #include <string>
@@ -93,6 +94,14 @@ LibraryHandle openLibrary(const char* name) {
 #endif
 }
 
+void closeLibrary(LibraryHandle lib) {
+#if defined(_WIN32)
+    if (lib) FreeLibrary((HMODULE)lib);
+#else
+    if (lib) dlclose(lib);
+#endif
+}
+
 void* resolve(LibraryHandle lib, const char* name) {
 #if defined(_WIN32)
     return (void*)GetProcAddress((HMODULE)lib, name);
@@ -100,6 +109,28 @@ void* resolve(LibraryHandle lib, const char* name) {
     return dlsym(lib, name);
 #endif
 }
+
+#if defined(_WIN32)
+// The loaded library's real path (for diagnostics).
+static std::string loadedLibraryPath(LibraryHandle lib) {
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA((HMODULE)lib, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::string();
+    return std::string(buf, n);
+}
+
+// The directory of the running executable — searched FIRST, so a proper
+// zlibwapi.dll / zlib1.dll placed next to ctfak-cpp.exe always wins over
+// whatever an old GTK#/app directory put on PATH.
+static std::string exeDirectory() {
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return std::string();
+    std::string path(buf, n);
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+}
+#endif
 
 // Symbol table: entry name -> target field offset within ZlibApi.
 struct SymbolEntry {
@@ -122,14 +153,13 @@ const SymbolEntry kSymbols[] = {
 // Builds the failure message listing everything that was attempted.
 std::string buildLoadError(const std::vector<std::string>& attempted) {
     std::string msg =
-        "Failed to load a zlib runtime library.\n"
+        "Failed to load a usable zlib runtime library.\n"
         "Place zlibwapi.dll next to the executable (the same prebuilt DLL the "
         "original tool ships in its requirements bundle), or set the CTFAK_ZLIB_DLL "
         "environment variable to its full path.\n"
-        "Tried: ";
+        "Tried:\n";
     for (size_t i = 0; i < attempted.size(); ++i) {
-        if (i) msg += ", ";
-        msg += attempted[i];
+        msg += "  - " + attempted[i] + "\n";
     }
     return msg;
 }
@@ -139,16 +169,57 @@ ZlibApi loadZlibApi() {
 
     std::vector<std::string> attempted;
 
-    std::vector<const char*> candidates;
-    const char* env = getenv("CTFAK_ZLIB_DLL");
-    if (env && *env) candidates.push_back(env);
-    for (const char* c : kDefaultCandidates) candidates.push_back(c);
+    // Candidate paths: the env override verbatim, then every default name
+    // prefixed with the executable's directory, then the bare name (standard
+    // search order: application dir, system dirs, CWD, PATH).
+    std::vector<std::string> candidates;
+    if (const char* env = getenv("CTFAK_ZLIB_DLL"); env && *env) candidates.push_back(env);
+#if defined(_WIN32)
+    const std::string exeDir = exeDirectory();
+#endif
+    for (const char* name : kDefaultCandidates) {
+#if defined(_WIN32)
+        if (!exeDir.empty()) candidates.push_back(exeDir + name);
+#endif
+        candidates.push_back(name);
+    }
 
     LibraryHandle lib = nullptr;
-    for (const char* name : candidates) {
-        lib = openLibrary(name);
-        attempted.push_back(name);
-        if (lib) break;
+    for (const std::string& cand : candidates) {
+        lib = openLibrary(cand.c_str());
+        if (!lib) {
+            attempted.push_back(cand + ": not found");
+            continue;
+        }
+        // Validate the WHOLE symbol table before accepting the library — a
+        // foreign zlib1.dll on PATH (an old GTK# runtime, an app's private
+        // copy) must not win over the next candidate.
+        ZlibApi probe{};
+        const char* missing = nullptr;
+        for (const SymbolEntry& sym : kSymbols) {
+            void* fn = resolve(lib, sym.name);
+            if (!fn) {
+                missing = sym.name;
+                break;
+            }
+            *reinterpret_cast<void**>(reinterpret_cast<char*>(&probe) + sym.offset) = fn;
+        }
+        if (missing) {
+#if defined(_WIN32)
+            attempted.push_back(cand + " [" + loadedLibraryPath(lib) + "]: missing " + missing);
+#else
+            attempted.push_back(cand + ": missing " + missing);
+#endif
+            closeLibrary(lib);
+            lib = nullptr;
+            continue;
+        }
+        api = probe;
+#if defined(_WIN32)
+        Logger::log("zlib bound: " + cand + " [" + loadedLibraryPath(lib) + "] version " +
+                    api.zlibVersion());
+#endif
+        break;
     }
 
 #if !defined(_WIN32)

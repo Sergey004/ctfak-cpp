@@ -6,10 +6,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # By default the build has NO external dependencies: zlib is loaded at runtime
 # (zlibwapi.dll / zlib1.dll on Windows, libz.so on Linux), mirroring the
-# original tool's distribution model. Set this to ON to link zlib the
-# classic way instead.
-option(CTFAKPP_LINK_ZLIB "Link zlib at build time instead of loading it at runtime" OFF)
-if(CTFAKPP_LINK_ZLIB)
+# original tool's distribution model. When a zlib IS visible to CMake (system
+# dev package, vcpkg, NuGet) the build links it instead — the runtime DLL hunt
+# then cannot pick a foreign zlib1.dll from PATH (an old GTK# runtime crashed
+# the MSVC build this way). Force the runtime model with
+# -DCTFAKPP_LINK_ZLIB=OFF.
+find_package(ZLIB QUIET)
+option(CTFAKPP_LINK_ZLIB "Link zlib at build time instead of loading it at runtime" ${ZLIB_FOUND})
+if(CTFAKPP_LINK_ZLIB AND NOT ZLIB_FOUND)
     find_package(ZLIB REQUIRED)
 endif()
 
