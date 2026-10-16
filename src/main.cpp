@@ -321,8 +321,17 @@ int main(int argc, char** argv) {
 
     auto started = std::chrono::steady_clock::now();
     GameData game;
-    if (!loadGame(path, game)) {
-        std::cout << "ERROR: Failed to read game\n";
+    try {
+        if (!loadGame(path, game)) {
+            std::cout << "ERROR: Failed to read game\n";
+            Logger::error("Failed to read game: loadGame returned false");
+            return 1;
+        }
+    } catch (const std::exception& e) {
+        // The container read path throws (e.g. the zlib runtime loader when no
+        // usable zlib DLL is found) — print the REASON instead of crashing.
+        std::cout << "ERROR while reading the game: " << e.what() << "\n";
+        Logger::error(std::string("Failed to read the game: ") + e.what());
         return 1;
     }
     auto finished = std::chrono::steady_clock::now();
