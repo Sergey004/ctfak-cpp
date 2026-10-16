@@ -5,6 +5,9 @@
 #include <cstdio>
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include <direct.h>   // _mkdir (MSVC keeps POSIX mkdir out of sys/stat.h)
+#endif
 
 namespace ctfak {
 

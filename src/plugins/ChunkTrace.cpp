@@ -4,6 +4,7 @@
 #include "../util/Config.h"
 #include "../util/Utils.h"
 #include "../core/Logger.h"
+#include <string>     // std::to_string (MSVC does not leak it transitively)
 
 namespace ctfak {
 

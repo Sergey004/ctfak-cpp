@@ -65,28 +65,102 @@ void gatherBlock(const uint8_t* rgba, int w, int h, int bx, int by, BlockPixels&
     }
 }
 
-// Choose 565 endpoints from luminance extremes among (optionally) opaque
-// pixels and build a 4-color or 3-color+black palette. Returns palette and
-// per-pixel indices. When threeColorWithBlack is true, palette[3] means
-// "transparent" and transparent pixels are assigned index 3.
+// Choose 565 endpoints for the block. Init from the per-channel range (the
+// principal-axis stand-in), then run a few classic cluster-fit rounds:
+// nearest-palette assignment -> weighted least-squares re-solve of the two
+// endpoints -> requantize. This replaces the old luminance-minmax one-shot
+// endpoints, which banded hard on the games' dark gradient photos.
+// When threeColorWithBlack is true, palette[3] means "transparent" and
+// transparent pixels are assigned index 3 (skipped by the fit).
 void fitColorBlock(const BlockPixels& px, bool threeColorWithBlack,
                    uint16_t& c0, uint16_t& c1, uint8_t idx[16]) {
-    int minL = 1 << 30, maxL = -1;
-    int minI = 0, maxI = 0;
+    // init: per-channel extremes (the widened bounding diagonal beats a
+    // luminance axis as a start for the iteration)
+    int minR = 255, maxR = 0, minG = 255, maxG = 0, minB = 255, maxB = 0;
     for (int i = 0; i < 16; ++i) {
         if (threeColorWithBlack && px.a[i] < kAlphaCut) continue;
-        int l = 30 * px.r[i] + 59 * px.g[i] + 11 * px.b[i];
-        if (l < minL) { minL = l; minI = i; }
-        if (l > maxL) { maxL = l; maxI = i; }
+        minR = std::min(minR, (int)px.r[i]); maxR = std::max(maxR, (int)px.r[i]);
+        minG = std::min(minG, (int)px.g[i]); maxG = std::max(maxG, (int)px.g[i]);
+        minB = std::min(minB, (int)px.b[i]); maxB = std::max(maxB, (int)px.b[i]);
     }
-    c0 = rgbTo565(px.r[maxI], px.g[maxI], px.b[maxI]);
-    c1 = rgbTo565(px.r[minI], px.g[minI], px.b[minI]);
+    c0 = rgbTo565(maxR, maxG, maxB);
+    c1 = rgbTo565(minR, minG, minB);
+
+    // weights mapping each palette slot to (1-w) of c0 + w of c1
+    const float w4[4] = { 0.0f, 1.0f, 1.0f / 3.0f, 2.0f / 3.0f };
+    const float w3[4] = { 0.0f, 1.0f, 0.5f, 0.0f };
+    const float* wt = threeColorWithBlack ? w3 : w4;
+
+    for (int iter = 0; iter < 4; ++iter) {
+        uint16_t e0 = c0, e1 = c1;
+        if (threeColorWithBlack ? (e0 > e1) : (e0 < e1)) std::swap(e0, e1);
+        if (!threeColorWithBlack && e0 == e1)
+            e1 = static_cast<uint16_t>(e1 > 0 ? e1 - 1 : e1 + 1);
+
+        int r0, g0, b0, r1, g1, b1;
+        expand565(e0, r0, g0, b0);
+        expand565(e1, r1, g1, b1);
+        int palR[4], palG[4], palB[4];
+        palR[0] = r0; palG[0] = g0; palB[0] = b0;
+        palR[1] = r1; palG[1] = g1; palB[1] = b1;
+        if (threeColorWithBlack) {
+            palR[2] = (r0 + r1) / 2; palG[2] = (g0 + g1) / 2; palB[2] = (b0 + b1) / 2;
+            palR[3] = palG[3] = palB[3] = 0;
+        } else {
+            palR[2] = (2 * r0 + r1) / 3; palG[2] = (2 * g0 + g1) / 3; palB[2] = (2 * b0 + b1) / 3;
+            palR[3] = (r0 + 2 * r1) / 3; palG[3] = (g0 + 2 * g1) / 3; palB[3] = (b0 + 2 * b1) / 3;
+        }
+        for (int i = 0; i < 16; ++i) {
+            if (threeColorWithBlack && px.a[i] < kAlphaCut) { idx[i] = 3; continue; }
+            const int maxP = threeColorWithBlack ? 3 : 4;   // opaque pixels never pick the cutout slot
+            int best = 0, bestD = 1 << 30;
+            for (int p = 0; p < maxP; ++p) {
+                int dr = palR[p] - px.r[i], dg = palG[p] - px.g[i], db = palB[p] - px.b[i];
+                int d = dr * dr + dg * dg + db * db;
+                if (d < bestD) { bestD = d; best = p; }
+            }
+            idx[i] = static_cast<uint8_t>(best);
+        }
+
+        // weighted LSQ re-solve: p_i ~= c0*(1-w_i) + c1*w_i per channel
+        double a = 0, b = 0, c = 0;
+        double dr0 = 0, dg0 = 0, db0 = 0, dr1 = 0, dg1 = 0, db1 = 0;
+        for (int i = 0; i < 16; ++i) {
+            const double w = wt[idx[i]];
+            const double u = 1.0 - w;
+            a += u * u; b += u * w; c += w * w;
+            dr0 += u * px.r[i]; dr1 += w * px.r[i];
+            dg0 += u * px.g[i]; dg1 += w * px.g[i];
+            db0 += u * px.b[i]; db1 += w * px.b[i];
+        }
+        const double det = a * c - b * b;
+        int nr, ng, nb, nr2, ng2, nb2;
+        if (det < 1e-9) {                                    // flat-ish block
+            nr = ng = nb = nr2 = ng2 = nb2 = 0;
+            double cnt = (a + c > 1e-9) ? 1.0 : 0.0;
+            if (cnt > 0) {
+                nr = (int)((dr0 + dr1) / (a + c) + 0.5);
+                ng = (int)((dg0 + dg1) / (a + c) + 0.5);
+                nb = (int)((db0 + db1) / (a + c) + 0.5);
+                nr2 = nr; ng2 = ng; nb2 = nb;
+            }
+        } else {
+            nr  = (int)((c * dr0 - b * dr1) / det + 0.5);
+            nr2 = (int)((a * dr1 - b * dr0) / det + 0.5);
+            ng  = (int)((c * dg0 - b * dg1) / det + 0.5);
+            ng2 = (int)((a * dg1 - b * dg0) / det + 0.5);
+            nb  = (int)((c * db0 - b * db1) / det + 0.5);
+            nb2 = (int)((a * db1 - b * db0) / det + 0.5);
+        }
+        auto cl = [](int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); };
+        c0 = rgbTo565(cl(nr), cl(ng), cl(nb));
+        c1 = rgbTo565(cl(nr2), cl(ng2), cl(nb2));
+    }
 
     if (threeColorWithBlack) {
-        // 3-color + transparent mode requires color0 <= color1.
         if (c0 > c1) std::swap(c0, c1);
+        if (c0 == c1) c1 = static_cast<uint16_t>(c1 + 1);
     } else {
-        // 4-color mode requires color0 > color1.
         if (c0 < c1) std::swap(c0, c1);
         if (c0 == c1) {
             // Degenerate: nudge c1 so the interpolants stay valid.
@@ -94,6 +168,7 @@ void fitColorBlock(const BlockPixels& px, bool threeColorWithBlack,
         }
     }
 
+    // final palette + assignment from the fitted endpoints
     int er, eg, eb, er2, eg2, eb2;
     expand565(c0, er, eg, eb);
     expand565(c1, er2, eg2, eb2);
@@ -103,7 +178,7 @@ void fitColorBlock(const BlockPixels& px, bool threeColorWithBlack,
         palR[0] = er;  palG[0] = eg;  palB[0] = eb;
         palR[1] = er2; palG[1] = eg2; palB[1] = eb2;
         palR[2] = (er + er2) / 2; palG[2] = (eg + eg2) / 2; palB[2] = (eb + eb2) / 2;
-        palR[3] = palG[3] = palB[3] = 0;             // transparent black slot
+        palR[3] = palG[3] = palB[3] = 0;
     } else {
         palR[0] = er;  palG[0] = eg;  palB[0] = eb;
         palR[1] = er2; palG[1] = eg2; palB[1] = eb2;
@@ -113,8 +188,9 @@ void fitColorBlock(const BlockPixels& px, bool threeColorWithBlack,
 
     for (int i = 0; i < 16; ++i) {
         if (threeColorWithBlack && px.a[i] < kAlphaCut) { idx[i] = 3; continue; }
+        const int maxP = threeColorWithBlack ? 3 : 4;   // opaque pixels never pick the cutout slot
         int best = 0, bestD = 1 << 30;
-        for (int p = 0; p < 4; ++p) {
+        for (int p = 0; p < maxP; ++p) {
             int dr = palR[p] - px.r[i], dg = palG[p] - px.g[i], db = palB[p] - px.b[i];
             int d = dr * dr + dg * dg + db * db;
             if (d < bestD) { bestD = d; best = p; }

@@ -7,6 +7,7 @@
 #include "../core/Settings.h"
 #include "../core/Zlib.h"
 #include <map>
+#include <string>     // std::to_string (MSVC does not leak it transitively)
 
 namespace ctfak {
 

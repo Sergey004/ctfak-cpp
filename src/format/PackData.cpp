@@ -2,6 +2,7 @@
 #include "../core/Zlib.h"
 #include "../core/Logger.h"
 #include "../core/Settings.h"
+#include <string>     // std::to_string (MSVC does not leak it transitively)
 
 namespace ctfak {
 

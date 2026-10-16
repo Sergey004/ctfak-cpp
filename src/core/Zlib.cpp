@@ -1,6 +1,7 @@
 #include "Zlib.h"
 #include "ZlibLib.h"
 #include <stdexcept>
+#include <string>     // std::to_string (MSVC does not leak it via <stdexcept>)
 #include <cstring>
 
 namespace ctfak {

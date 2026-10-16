@@ -28,10 +28,15 @@ std::string asciiOnly(const std::string& s) {
 
 std::string quoted(const std::string& s) { return "\"" + asciiOnly(s) + "\""; }
 
-// Fusion timer unit is 1/50 s (the editor shows 1"50 = one second).
+// Fusion event timer parameters are stored in MILLISECONDS, not 1/50 s ticks.
+// Proof chain (raw values from the games' own events): FNAF1 office AI
+// opportunity intervals 4970/4980/3020/5010 = the datamined 4.97/4.98/3.02/5.01 s
+// (Bonnie/Chica/Freddy/Foxy); FNAF4 hour 60000 = 60 s; one-shot holds
+// 10000 = 10 s. The old /50 annotation (the editor's 1"50 display) read these
+// 20x too long.
 std::string ticksToSeconds(int64_t ticks) {
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "~%.2fs", static_cast<double>(ticks) / 50.0);
+    std::snprintf(buf, sizeof(buf), "~%.2fs", static_cast<double>(ticks) / 1000.0);
     return buf;
 }
 

@@ -33,15 +33,18 @@ Parameter makeParam(Parameter::Kind kind, int16_t code) {
 TEST(events_describe_time) {
     Parameter p = makeParam(Parameter::Kind::Time, 2);
     p.value = 90;
-    EXPECT_EQ(describeEventParameter(p, testResolver()), std::string("timer 90 (~1.80s)"));
+    // v2.72: CFT event timer parameters are MILLISECONDS (proof: F1 AI
+    // intervals 4970/5010 = the datamined 4.97/5.01 s) — the old /50
+    // annotation read them 20x too long.
+    EXPECT_EQ(describeEventParameter(p, testResolver()), std::string("timer 90 (~0.09s)"));
     p.value2 = 3;
-    EXPECT_EQ(describeEventParameter(p, testResolver()), std::string("timer 90 (~1.80s) loops 3"));
+    EXPECT_EQ(describeEventParameter(p, testResolver()), std::string("timer 90 (~0.09s) loops 3"));
 }
 
 TEST(events_describe_every) {
     Parameter p = makeParam(Parameter::Kind::Every, 13);
     p.value = 50;
-    EXPECT_EQ(describeEventParameter(p, testResolver()), std::string("every 50 (~1.00s)"));
+    EXPECT_EQ(describeEventParameter(p, testResolver()), std::string("every 50 (~0.05s)"));
 }
 
 TEST(events_describe_values) {

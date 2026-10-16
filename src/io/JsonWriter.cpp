@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <sstream>
+#include <string>     // std::to_string (MSVC does not leak it transitively)
 
 namespace ctfak {
 

@@ -173,6 +173,35 @@ static bool loadGame(const std::string& path, GameData& game) {
                 }
             }
         }
+        if (getenv("CTFAK_DUMP_FONTS")) {
+            // the font bank (chunk 26215): Text objects reference it by index
+            // (the JSON "font" field) — this resolves indices to face names.
+            std::cout << "=== font bank (" << game.fonts.items.size() << ") ===\n";
+            for (size_t i = 0; i < game.fonts.items.size(); ++i) {
+                const auto& f = game.fonts.items[i];
+                std::cout << "[" << i << "] handle=" << f->handle << " \"" << f->faceName
+                          << "\" h=" << f->height << " w=" << f->width
+                          << " weight=" << f->weight << " italic=" << (int)f->italic
+                          << " charset=" << (int)f->charSet << "\n";
+            }
+        }
+        if (getenv("CTFAK_DUMP_TTFS")) {
+            // chunk 8793: TTFs EMBEDDED by the author so the runtime renders
+            // with the exact faces on any machine. Extract them whole.
+            std::string dir = g_dumpsDir + "/TTFonts";
+            createDirectories(dir);
+            std::cout << "=== ttf bank (" << game.trueTypeFonts.fonts.size() << ") ===\n";
+            for (size_t i = 0; i < game.trueTypeFonts.fonts.size(); ++i) {
+                std::string out = dir + "/font_" + std::to_string(i) + ".ttf";
+                FILE* fp = fopen(out.c_str(), "wb");
+                if (!fp) continue;
+                fwrite(game.trueTypeFonts.fonts[i].data(), 1,
+                       game.trueTypeFonts.fonts[i].size(), fp);
+                fclose(fp);
+                std::cout << "  [" << i << "] " << game.trueTypeFonts.fonts[i].size()
+                          << " bytes -> " << out << "\n";
+            }
+        }
         return true;
     }
 
@@ -195,6 +224,18 @@ static bool loadGame(const std::string& path, GameData& game) {
         std::cout << "=== file order frames ===\n";
         for (size_t fi = 0; fi < game.frames.size(); ++fi)
             std::cout << "file[" << fi << "] \"" << (game.frames[fi] ? game.frames[fi]->name : std::string("?")) << "\"\n";
+    }
+    if (getenv("CTFAK_DUMP_FONTS")) {
+        // the font bank (chunk 26215): Text objects reference it by index
+        // (the JSON "font" field) — this resolves indices to face names.
+        std::cout << "=== font bank (" << game.fonts.items.size() << ") ===\n";
+        for (size_t i = 0; i < game.fonts.items.size(); ++i) {
+            const auto& f = game.fonts.items[i];
+            std::cout << "[" << i << "] handle=" << f->handle << " \"" << f->faceName
+                      << "\" h=" << f->height << " w=" << f->width
+                      << " weight=" << f->weight << " italic=" << (int)f->italic
+                      << " charset=" << (int)f->charSet << "\n";
+        }
     }
     return true;
 }
