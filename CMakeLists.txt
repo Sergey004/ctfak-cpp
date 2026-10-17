@@ -1,20 +1,43 @@
 cmake_minimum_required(VERSION 3.16)
-project(ctfak-cpp VERSION 1.4.0 LANGUAGES CXX)
+project(ctfak-cpp VERSION 1.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# By default the build has NO external dependencies: zlib is loaded at runtime
-# (zlibwapi.dll / zlib1.dll on Windows, libz.so on Linux), mirroring the
-# original tool's distribution model. When a zlib IS visible to CMake (system
-# dev package, vcpkg, NuGet) the build links it instead — the runtime DLL hunt
-# then cannot pick a foreign zlib1.dll from PATH (an old GTK# runtime crashed
-# the MSVC build this way). Force the runtime model with
-# -DCTFAKPP_LINK_ZLIB=OFF.
+# zlib is ALWAYS linked at build time now: the system one when CMake can see
+# it, otherwise the vendored zlib 1.3.1 in third_party/zlib — no runtime DLL
+# hunt on any machine (the old model crashed the MSVC build on a foreign
+# zlib1.dll from PATH and then on a machine with no zlib DLL at all).
+# FORCEd so existing build caches flip automatically; to debug the old
+# runtime-load path, edit this line (the loader code is kept).
 find_package(ZLIB QUIET)
-option(CTFAKPP_LINK_ZLIB "Link zlib at build time instead of loading it at runtime" ${ZLIB_FOUND})
-if(CTFAKPP_LINK_ZLIB AND NOT ZLIB_FOUND)
-    find_package(ZLIB REQUIRED)
+set(CTFAKPP_LINK_ZLIB ON CACHE BOOL
+    "Link zlib at build time (system or vendored) instead of loading it at runtime" FORCE)
+if(CTFAKPP_LINK_ZLIB)
+    if(ZLIB_FOUND)
+        set(CTFAK_ZLIB_TARGET ZLIB::ZLIB)
+        message(STATUS "ctfak: linking system zlib")
+    else()
+        # Vendored zlib 1.3.1 (Zlib license, see third_party/zlib/LICENSE).
+        # Minimal set: inflate/deflate/crc32 — no gz* file API needed.
+        set(CTFAK_ZLIB_SOURCES
+            third_party/zlib/adler32.c
+            third_party/zlib/crc32.c
+            third_party/zlib/deflate.c
+            third_party/zlib/infback.c
+            third_party/zlib/inffast.c
+            third_party/zlib/inflate.c
+            third_party/zlib/inftrees.c
+            third_party/zlib/trees.c
+            third_party/zlib/zutil.c)
+        add_library(ctfak_zlib STATIC ${CTFAK_ZLIB_SOURCES})
+        target_include_directories(ctfak_zlib PUBLIC third_party/zlib)
+        if(MSVC)
+            target_compile_definitions(ctfak_zlib PRIVATE _CRT_SECURE_NO_WARNINGS)
+        endif()
+        set(CTFAK_ZLIB_TARGET ctfak_zlib)
+        message(STATUS "ctfak: building vendored zlib 1.3.1")
+    endif()
 endif()
 
 set(CTFAK_LIB_SOURCES
@@ -67,7 +90,7 @@ add_library(ctfak_core STATIC ${CTFAK_LIB_SOURCES})
 target_include_directories(ctfak_core PUBLIC src)
 if(CTFAKPP_LINK_ZLIB)
     target_compile_definitions(ctfak_core PUBLIC CTFAKPP_LINK_ZLIB)
-    target_link_libraries(ctfak_core PUBLIC ZLIB::ZLIB)
+    target_link_libraries(ctfak_core PUBLIC ${CTFAK_ZLIB_TARGET})
 else()
     # dlopen/dlsym on POSIX (empty on modern glibc and on Windows).
     target_link_libraries(ctfak_core PUBLIC ${CMAKE_DL_LIBS})
