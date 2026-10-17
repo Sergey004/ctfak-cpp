@@ -51,10 +51,14 @@ const ZlibApi& zlibApi() {
         },
         [](zlibabi::ZStream* s, int f) { return deflate((z_streamp)s, f); },
         [](zlibabi::ZStream* s) { return deflateEnd((z_streamp)s); },
-        [](zlibabi::ZStream* s, zlibabi::ULong n) {
+        [](zlibabi::ZStream* s, zlibabi::ULong n) -> zlibabi::ULong {
+            // zlib's uLong is `unsigned long` (32-bit under LLP64) while our
+            // ULong is `unsigned int` — same width, different type, so the
+            // conversion must happen INSIDE the lambda (MSVC rejects the
+            // function-pointer mismatch).
             return deflateBound((z_streamp)s, n);
         },
-        [](zlibabi::ULong c, const zlibabi::Byte* b, zlibabi::UInt n) {
+        [](zlibabi::ULong c, const zlibabi::Byte* b, zlibabi::UInt n) -> zlibabi::ULong {
             return crc32((uLong)c, b, n);
         },
     };
