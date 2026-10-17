@@ -4,6 +4,10 @@ project(ctfak-cpp VERSION 1.4.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# CTFAKPP_REPACKER_ONLY: only the Recomp Pack tool (the .pak repacker) is
+# built — the CI/distribution profile; other plugins are compiled out.
+option(CTFAKPP_REPACKER_ONLY "Build only the Recomp Pack repacker" OFF)
+
 # zlib is ALWAYS linked at build time now: the system one when CMake can see
 # it, otherwise the vendored zlib 1.3.1 in third_party/zlib — no runtime DLL
 # hunt on any machine (the old model crashed the MSVC build on a foreign
@@ -74,20 +78,30 @@ set(CTFAK_LIB_SOURCES
     src/format/Events.cpp
     src/format/GameData.cpp
     src/plugins/Plugin.cpp
-    src/plugins/ImageDumper.cpp
-    src/plugins/SoundDumper.cpp
-    src/plugins/SortedImageDumper.cpp
-    src/plugins/ChunkTrace.cpp
-    src/plugins/JsonExport.cpp
-    src/plugins/FrameLayout.cpp
-    src/plugins/FrameReplay.cpp
-    src/plugins/EventsListing.cpp
     src/plugins/DxtEncoder.cpp
     src/plugins/RecompPack.cpp
 )
 
+# CTFAKPP_REPACKER_ONLY: build ONLY the Recomp Pack tool (the .pak repacker) —
+# the CI profile. Other plugins are compiled out; the tool menu then holds a
+# single entry.
+if(NOT CTFAKPP_REPACKER_ONLY)
+    list(APPEND CTFAK_LIB_SOURCES
+        src/plugins/ImageDumper.cpp
+        src/plugins/SoundDumper.cpp
+        src/plugins/SortedImageDumper.cpp
+        src/plugins/ChunkTrace.cpp
+        src/plugins/JsonExport.cpp
+        src/plugins/FrameLayout.cpp
+        src/plugins/FrameReplay.cpp
+        src/plugins/EventsListing.cpp)
+endif()
+
 add_library(ctfak_core STATIC ${CTFAK_LIB_SOURCES})
 target_include_directories(ctfak_core PUBLIC src)
+if(CTFAKPP_REPACKER_ONLY)
+    target_compile_definitions(ctfak_core PUBLIC CTFAKPP_REPACKER_ONLY)
+endif()
 if(CTFAKPP_LINK_ZLIB)
     target_compile_definitions(ctfak_core PUBLIC CTFAKPP_LINK_ZLIB)
     target_link_libraries(ctfak_core PUBLIC ${CTFAK_ZLIB_TARGET})
@@ -106,6 +120,9 @@ add_executable(ctfak-cpp src/main.cpp)
 target_link_libraries(ctfak-cpp PRIVATE ctfak_core)
 
 # ---------------------------------------------------------------- tests
+# (full builds only — the events-listing tests need plugins that the
+# repacker-only profile compiles out)
+if(NOT CTFAKPP_REPACKER_ONLY)
 enable_testing()
 add_executable(ctfak-tests
     tests/test_main.cpp
@@ -120,3 +137,4 @@ add_executable(ctfak-tests
 )
 target_link_libraries(ctfak-tests PRIVATE ctfak_core)
 add_test(NAME unit-tests COMMAND ctfak-tests)
+endif()

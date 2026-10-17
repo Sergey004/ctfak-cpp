@@ -68,3 +68,4 @@ Testing/
 .cache/
 *.Identifier
 build1
+/.vs

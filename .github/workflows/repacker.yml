@@ -1,0 +1,58 @@
+# Builds the Recomp Pack repacker (CTFAKPP_REPACKER_ONLY=ON) and publishes it
+# as a GitHub RELEASE asset.
+#   - push of a v* tag            -> release named after the tag (v1.4.1 ...)
+#   - workflow_dispatch (manual)  -> rolling "Repacker (latest)" prerelease
+# The build is dependency-free: zlib is vendored in the repo
+# (third_party/zlib), so no packages are installed on any runner.
+name: repacker
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (repacker only)
+        run: cmake -B build -DCTFAKPP_REPACKER_ONLY=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Stage
+        shell: pwsh
+        run: Copy-Item build/Release/ctfak-cpp.exe ctfak-repacker-windows.exe
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'repacker-latest' }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'Repacker (latest)' }}
+          files: ctfak-repacker-windows.exe
+          prerelease: ${{ github.ref_type != 'tag' }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  linux-x64:
+    needs: windows-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (repacker only)
+        run: cmake -B build -DCTFAKPP_REPACKER_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Stage
+        run: cp build/ctfak-cpp ctfak-repacker-linux
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'repacker-latest' }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || 'Repacker (latest)' }}
+          files: ctfak-repacker-linux
+          prerelease: ${{ github.ref_type != 'tag' }}
+          fail_on_unmatched_files: true
+          generate_release_notes: false
