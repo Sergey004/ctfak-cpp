@@ -15,6 +15,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <iostream>
+#include <map>
+#include <set>
 
 namespace ctfak {
 
@@ -276,6 +279,84 @@ void RecompPack::execute(GameData& game) {
         textures.push_back(std::move(t));
     }
 
+    // ---------------- room-sorted blob order (streaming paks)
+    // SISTER LOCATION ONLY (the user's call): the one game whose pak is far
+    // too big for memory and streams room-to-room, so its blobs are
+    // regrouped — COMMON images (used by >= 2 frames) first, then each
+    // frame's exclusive images as one contiguous run in frame order, then
+    // images referenced by no frame. A room preload then reads ~1 sequential
+    // run instead of scattering across the whole multi-GB pak. Every other
+    // game keeps the classic order (ascending image handle) byte-identical
+    // to its previous pak (FNAF1's is verified against its reference).
+    bool roomSort = false;
+    {
+        const std::string lowT = LowerTitle(game.name);
+        if (lowT.find("sister location") != std::string::npos)
+            roomSort = true;
+    }
+    std::vector<std::set<int>> frameImgs;
+    std::set<int> commonImgs;
+    if (roomSort) {
+        // Per-frame image-handle sets from the parsed game data: every
+        // instance's object -> animation cells / backdrop / counter frames.
+        frameImgs.assign(game.frames.size(), std::set<int>());
+        for (size_t fi = 0; fi < game.frames.size(); ++fi) {
+            std::set<int> objs;
+            for (const auto& inst : game.frames[fi]->objects)
+                objs.insert((int)inst.objectInfo);
+            std::set<int>& imgs = frameImgs[fi];
+            for (int oi : objs) {
+                auto it = game.frameItems.find(oi);
+                if (it == game.frameItems.end() || !it->second) continue;
+                const ObjectInfo& info = *it->second;
+                if (info.common) {
+                    for (const auto& anim : info.common->animations.items)
+                        for (const auto& dir : anim.second)
+                            for (uint16_t h : dir.second.frames)
+                                imgs.insert((int)h);
+                    if (info.common->counter)
+                        for (uint16_t h : info.common->counter->frames)
+                            imgs.insert((int)h);
+                }
+                if (info.backdrop) imgs.insert((int)info.backdrop->image);
+                if (info.quickBackdrop && info.quickBackdrop->shape.image >= 0)
+                    imgs.insert((int)info.quickBackdrop->shape.image);
+            }
+        }
+        std::map<int, int> useCount;
+        for (const auto& imgs : frameImgs)
+            for (int h : imgs) ++useCount[h];
+        for (const auto& u : useCount)
+            if (u.second >= 2) commonImgs.insert(u.first);
+
+        // The reorder itself. A texture missing from the pak (compression
+        // failure) is skipped by the posOf lookup.
+        std::map<std::string, size_t> posOf;   // pak name -> old position
+        for (size_t i = 0; i < textures.size(); ++i) posOf[textures[i].name] = i;
+        std::vector<bool> placed(textures.size(), false);
+        auto placeHandle = [&](int h, std::vector<PakTextureSpec>& dst) {
+            char nm[32];
+            std::snprintf(nm, sizeof(nm), "img_%d", h);
+            auto p = posOf.find(nm);
+            if (p != posOf.end() && !placed[p->second]) {
+                dst.push_back(textures[p->second]);
+                placed[p->second] = true;
+            }
+        };
+        std::vector<PakTextureSpec> ordered;
+        ordered.reserve(textures.size());
+        for (int h : commonImgs) placeHandle(h, ordered);
+        for (const auto& imgs : frameImgs)
+            for (int h : imgs)
+                if (!commonImgs.count(h)) placeHandle(h, ordered);
+        for (size_t i = 0; i < textures.size(); ++i)
+            if (!placed[i]) ordered.push_back(textures[i]);
+        textures.swap(ordered);
+        Logger::log("Recomp Pack: room-sorted blob order: " +
+                    std::to_string(commonImgs.size()) + " common images, " +
+                    std::to_string(frameImgs.size()) + " frame runs");
+    }
+
     // ---------------- sounds
     std::vector<PakSoundSpec> sounds;
     sounds.reserve(game.sounds.items.size());
@@ -372,7 +453,45 @@ void RecompPack::execute(GameData& game) {
                       t.fmt == kFmtDxt5 ? "true" : "false");
         mapping += line;
     }
-    mapping += "};\n} // namespace " + gameId + "\n";
+    mapping += "};\n";
+
+    // v2.29: streaming preload table — emitted for room-sorted paks only.
+    // Per frame, the PAK INDICES of that frame's images, ascending by pak
+    // position (each frame = one contiguous run). The game module feeds it
+    // to PakLoader::PreloadIndices() while a dump-faithful transition
+    // (the elevator ride, the load router) covers the read.
+    if (roomSort) {
+        std::map<int, int> pakPos;   // image handle -> pak position
+        for (size_t i = 0; i < textures.size(); ++i)
+            pakPos[std::atoi(textures[i].name.c_str() + 4)] = (int)i;
+        mapping += "\n// Streaming preload table (room-sorted pak): per frame, the pak\n"
+                   "// indices of the frame's images, ascending by pak position, so a\n"
+                   "// room preload is ~1 sequential read. See PakLoader::PreloadIndices.\n"
+                   "struct FrameImages { int frame; const char* name; int count; const int* images; };\n";
+        std::string rows;
+        for (size_t fi = 0; fi < frameImgs.size(); ++fi) {
+            std::vector<std::pair<int, int>> idxs;   // (pak pos, handle)
+            for (int h : frameImgs[fi]) {
+                auto p = pakPos.find(h);
+                if (p != pakPos.end()) idxs.push_back(std::make_pair(p->second, h));
+            }
+            if (idxs.empty()) continue;
+            std::sort(idxs.begin(), idxs.end());
+            std::string arrName = "f" + std::to_string(fi) + "_imgs";
+            mapping += "static const int " + arrName + "[] = {";
+            for (size_t k = 0; k < idxs.size(); ++k) {
+                mapping += (k % 16 == 0 ? "\n    " : " ");
+                mapping += std::to_string(idxs[k].first) + ",";
+            }
+            mapping += "\n};\n";
+            rows += "    { " + std::to_string(fi) + ", \"" +
+                    jsonEscapeCopy(game.frames[fi]->name) + "\", " +
+                    std::to_string(idxs.size()) + ", " + arrName + " },\n";
+        }
+        mapping += "\nstatic const FrameImages frameImages[] = {\n" + rows + "};\n";
+        mapping += "const int FRAME_COUNT = (int)(sizeof(frameImages) / sizeof(frameImages[0]));\n";
+    }
+    mapping += "} // namespace " + gameId + "\n";
     std::FILE* mf = std::fopen(pathJoin(dir, "asset_mapping_" + gameId + ".hpp").c_str(), "wb");
     if (mf) { std::fwrite(mapping.data(), 1, mapping.size(), mf); std::fclose(mf); }
 
@@ -381,6 +500,7 @@ void RecompPack::execute(GameData& game) {
     json += "{\n  \"magic\": \"FNAF\",\n  \"version\": " + std::to_string(kPakVersion) + ",\n";
     json += "  \"textureCount\": " + std::to_string(textures.size()) + ",\n";
     json += "  \"soundCount\": " + std::to_string(sounds.size()) + ",\n";
+    json += "  \"roomSort\": " + std::string(roomSort ? "true" : "false") + ",\n";
     json += "  \"pakBytes\": " + std::to_string(pak.size()) + ",\n";
     json += "  \"textures\": [\n";
     for (size_t i = 0; i < textures.size(); ++i) {
@@ -410,7 +530,26 @@ void RecompPack::execute(GameData& game) {
                       i + 1 < sounds.size() ? "," : "");
         json += entry;
     }
-    json += "  ]\n}\n";
+    json += "  ]";
+    if (roomSort) {
+        json += ",\n  \"frames\": [\n";
+        bool firstFrame = true;
+        for (size_t fi = 0; fi < frameImgs.size(); ++fi) {
+            if (frameImgs[fi].empty()) continue;
+            json += firstFrame ? "" : ",\n";
+            firstFrame = false;
+            json += "    {\"frame\": " + std::to_string(fi) + ", \"name\": \"" +
+                    jsonEscapeCopy(game.frames[fi]->name) + "\", \"images\": [";
+            bool firstImg = true;
+            for (int h : frameImgs[fi]) {
+                json += (firstImg ? "" : ", ") + std::to_string(h);
+                firstImg = false;
+            }
+            json += "]}";
+        }
+        json += "\n  ]";
+    }
+    json += "\n}\n";
     std::FILE* jf = std::fopen(pathJoin(dir, "pak_manifest.json").c_str(), "wb");
     if (jf) { std::fwrite(json.data(), 1, json.size(), jf); std::fclose(jf); }
 
