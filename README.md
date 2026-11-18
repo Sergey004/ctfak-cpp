@@ -45,6 +45,16 @@ inspired by CTFAK 2.0 (C#) but shares no code with it.
     Image Dumper writes, 100 px coordinate grid with rulers — embedded bitmap font,
     no dependencies) and an exact placement table `.txt` per frame (includes a
     "dump file" column)
+  - *Frame Runtime Renderer* — a separate **frame-start runtime viewport** into
+    `FrameRuntime/`: uses `windowWidth/windowHeight` instead of the full editor
+    world, honors layer/object visibility and `DoNotCreateAtStart`, selects the
+    initial movement direction, applies hotspots, RGB coefficients, solid or
+    gradient Quick Backdrops, and the CTF inverse transparency coefficient
+    (`0 = opaque`, `255 = invisible`). No grid, wireframe or debug font is drawn.
+    Each PNG has a text report naming unsupported text/TTF and custom HWA cases.
+    This is the view before the first event/animation tick, **not** an event VM:
+    event actions, custom shaders, TTF rasterization and animation/scroll ticks
+    are explicitly reported rather than simulated.
   - *Events Listing* — the complete event program (conditions/actions) of every
     frame as a human readable text listing in the Fusion event-grid style:
     `ON`/`DO` lines with resolved object names, condition/action numbers, raw

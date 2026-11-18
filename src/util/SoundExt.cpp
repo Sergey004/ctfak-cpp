@@ -15,6 +15,15 @@ std::string sniffSoundExtension(const std::vector<uint8_t>& d) {
     if (hasMagic(d, 0, "OggS", 4)) return ".ogg";
     if (hasMagic(d, 0, "FORM", 4)) return ".aiff";
     if (hasMagic(d, 0, "ID3", 3)) return ".mp3";
+    // A headerless MPEG audio frame starts with 11 set bits (0xFF + a byte
+    // whose top three bits are set). Several FNAF banks ship MP3s without
+    // an ID3 tag, and without this check they used to fall through to the
+    // ".wav" fallback below and be misnamed on disk.
+    if (d[0] == 0xFF && (d[1] & 0xE0) == 0xE0) {
+        const int version = (d[1] >> 3) & 3;
+        const int layer = (d[1] >> 1) & 3;
+        if (version != 1 && layer != 0) return ".mp3";
+    }
     if (d.size() < 0x2C) return ".bin";
     if (hasMagic(d, 0, "IMPM", 4)) return ".it";
     if (hasMagic(d, 0, "Extended Module: ", 17)) return ".xm";

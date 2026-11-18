@@ -4,7 +4,7 @@
 //
 // Outputs (under <dumps>/<Game>/RecompPack/):
 //   fnaf1.pak          -- big-endian container consumed by PakLoader.cpp
-//                         (magic 'FNAF', DXT1/DXT5 textures, PCM sounds)
+//                         (magic 'FNAF', DXT1/DXT5 textures, WAV/MP3 sounds)
 //   pak_manifest.json  -- full layout listing of the generated pak
 //   asset_mapping.hpp  -- ground-truth 605-entry {handle,name,w,h,alpha} table
 #pragma once
@@ -29,10 +29,14 @@ struct PakTextureSpec {
 // One sound blob as it will live inside the pak.
 struct PakSoundSpec {
     std::string name;      // e.g. "snd_Buzz_Fan"
-    uint32_t fmt = 0;      // 0 = raw PCM, 2 = passthrough (not PCM)
+    uint32_t fmt = 0;      // 0 = complete WAV/PCM, 2 = original runtime-decoded blob
     uint32_t sampleRate = 0;
     uint32_t channels = 0;
+    uint32_t bits = 16;    // bit depth (8, 16, etc.); default 16 for backward compat
     uint32_t loopStart = 0, loopEnd = 0;
+    // The container the sound came from ("wav", "mp3", "ogg", ...) — the
+    // manifest records it, so a converted source is visible at a glance.
+    std::string sourceFormat;
     std::vector<uint8_t> data;
 };
 

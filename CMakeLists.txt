@@ -58,6 +58,7 @@ set(CTFAK_LIB_SOURCES
     src/io/WavWriter.cpp
     src/util/Utils.cpp
     src/util/SoundExt.cpp
+    src/util/AudioDecoder.cpp
     src/util/ApkReader.cpp
     src/util/Config.cpp
     src/format/Chunk.cpp
@@ -94,6 +95,7 @@ if(NOT CTFAKPP_REPACKER_ONLY)
         src/plugins/JsonExport.cpp
         src/plugins/FrameLayout.cpp
         src/plugins/FrameReplay.cpp
+        src/plugins/FrameRuntime.cpp
         src/plugins/EventsListing.cpp)
 endif()
 
@@ -133,6 +135,7 @@ add_executable(ctfak-tests
     tests/test_json.cpp
     tests/test_reader.cpp
     tests/test_layout.cpp
+    tests/test_frame_runtime.cpp
     tests/test_events_listing.cpp
 )
 target_link_libraries(ctfak-tests PRIVATE ctfak_core)

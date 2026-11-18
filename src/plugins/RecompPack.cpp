@@ -3,13 +3,16 @@
 // Texture pipeline: decoded RGBA -> alpha scan (any a != 255 => DXT5, else
 // DXT1) -> edge-replicated padding to multiples of 32 (the alignment the
 // console runtime expects for tiled textures) -> DXT compress -> pak blob.
-// Sound pipeline: bank data -> RIFF/WAVE parse -> raw PCM payload with
-// sample rate/channels recorded in the entry; non-PCM data passes through
-// untouched with fmt = 2.
+// Sound pipeline: PCM WAV sources keep their complete RIFF/WAVE blob;
+// MP3 sources pass through byte-exact with fmt=2 for the game's dr_mp3;
+// Ogg/other supported inputs are converted to a canonical PCM16 WAV.
 
 #include "RecompPack.h"
 #include "DxtEncoder.h"
 #include "../core/Logger.h"
+#include "../format/Events.h"   // v2.81: the parsed event program (Kind::Sample)
+#include "../io/WavWriter.h"    // v2.92: wraps decoded PCM back into a RIFF/WAVE
+#include "../util/AudioDecoder.h"  // content sniffing + Ogg -> PCM16
 #include "../util/Config.h"
 #include "../util/Utils.h"
 #include <algorithm>
@@ -24,24 +27,38 @@ namespace ctfak {
 namespace {
 
 constexpr uint32_t kPakMagic = 0x464E4146u; // 'FNAF'
-constexpr uint32_t kPakVersion = 1;
+constexpr uint32_t kPakVersion = 1; // v1: 8 u32 per sound entry. The sound
+                                    // parameters (rate/channels/bit depth)
+                                    // live in the RIFF/WAVE header of the
+                                    // blob itself — the same place the
+                                    // original Clickteam app read them from.
+                                    // (v2 briefly added a `bits` word to the
+                                    // table; with the headers kept in the
+                                    // pak it is redundant.)
 constexpr int kAlignStep = 32;   // texture alignment the X360 tiling expects
 constexpr uint32_t kFmtDxt1 = 0;
 constexpr uint32_t kFmtDxt5 = 2;
 constexpr uint32_t kFmtA8R8G8B8 = 3;
 
-void putU32be(std::vector<uint8_t>& v, uint32_t x) {
+// Sound format constants
+constexpr uint32_t kSndFmtPcm = 0;
+constexpr uint32_t kSndFmtPassthrough = 2;
+
+} // namespace
+
+// Helper functions (in ctfak namespace for access by execute())
+inline void putU32be(std::vector<uint8_t>& v, uint32_t x) {
     v.push_back(static_cast<uint8_t>(x >> 24));
     v.push_back(static_cast<uint8_t>(x >> 16));
     v.push_back(static_cast<uint8_t>(x >> 8));
     v.push_back(static_cast<uint8_t>(x));
 }
 
-uint32_t roundUpTo(uint32_t v, uint32_t step) {
+inline uint32_t roundUpTo(uint32_t v, uint32_t step) {
     return (v + step - 1) / step * step;
 }
 
-std::string baseNameNoExt(const std::string& path) {
+inline std::string baseNameNoExt(const std::string& path) {
     size_t slash = path.find_last_of("/\\");
     std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
     size_t dot = base.find_last_of('.');
@@ -52,7 +69,7 @@ std::string baseNameNoExt(const std::string& path) {
     return base;
 }
 
-std::string jsonEscapeCopy(const std::string& s) {
+inline std::string jsonEscapeCopy(const std::string& s) {
     std::string out;
     for (char c : s) {
         switch (c) {
@@ -74,7 +91,13 @@ std::string jsonEscapeCopy(const std::string& s) {
     return out;
 }
 
-} // namespace
+inline std::string LowerTitle(const std::string& in) {
+    std::string out = in;
+    for (std::string::iterator c = out.begin(); c != out.end(); ++c) {
+        if (*c >= 'A' && *c <= 'Z') *c = static_cast<char>(*c - 'A' + 'a');
+    }
+    return out;
+}
 
 bool parseWav(const std::vector<uint8_t>& data, uint32_t& sampleRate,
               uint32_t& channels, uint32_t& bits, size_t& pcmOffset,
@@ -141,6 +164,8 @@ bool buildPak(const std::vector<PakTextureSpec>& textures,
     const uint32_t numSnd = static_cast<uint32_t>(sounds.size());
     const uint32_t headerSize = 8 * 4;
     const uint32_t texTable = numTex * 9 * 4;
+    // v1 sound entry: eight u32 (nameOff, dataOff, dataSize, fmt, sr, ch,
+    // loopStart, loopEnd) — the bit depth travels in the blob's RIFF header.
     const uint32_t sndTable = numSnd * 8 * 4;
     const uint32_t stringsOffset = headerSize + texTable + sndTable;
 
@@ -198,7 +223,8 @@ bool buildPak(const std::vector<PakTextureSpec>& textures,
         putU32be(out, t.alignH);
         putU32be(out, t.mip);
     }
-    // Sound entries (nameOff, dataOff, dataSize, fmt, sampleRate, channels, loopStart, loopEnd).
+    // Sound entries (nameOff, dataOff, dataSize, fmt, sampleRate, channels, bits, loopStart, loopEnd).
+    // v2: added bits field (bit depth, e.g., 8, 16) after channels.
     for (size_t i = 0; i < sounds.size(); ++i) {
         const auto& s = sounds[i];
         putU32be(out, nameOffsets[numTex + i]);
@@ -207,6 +233,7 @@ bool buildPak(const std::vector<PakTextureSpec>& textures,
         putU32be(out, s.fmt);
         putU32be(out, s.sampleRate);
         putU32be(out, s.channels);
+        // v1: no bit-depth word — it is in the blob's RIFF header.
         putU32be(out, s.loopStart);
         putU32be(out, s.loopEnd);
     }
@@ -224,16 +251,7 @@ bool buildPak(const std::vector<PakTextureSpec>& textures,
 }
 
 // ------------------------------------------------------------------ the tool
-// Case-folded copy of the app title for canonical-pak-name matching.
-static std::string LowerTitle(const std::string& in) {
-    std::string out = in;
-    for (std::string::iterator c = out.begin(); c != out.end(); ++c) {
-        if (*c >= 'A' && *c <= 'Z') *c = static_cast<char>(*c - 'A' + 'a');
-    }
-    return out;
-}
-
-void RecompPack::execute(GameData& game) {
+void ctfak::RecompPack::execute(GameData& game) {
     std::string dir = pathJoin(pathJoin(g_dumpsDir,
         sanitizeGameName(game.name.empty() ? "Unknown Game" : game.name)), "RecompPack");
     createDirectories(dir);
@@ -296,6 +314,9 @@ void RecompPack::execute(GameData& game) {
     }
     std::vector<std::set<int>> frameImgs;
     std::set<int> commonImgs;
+    // v2.81: the per-frame sound sets (ordinals into game.sounds.items order)
+    std::vector<std::set<int>> frameSnds;
+    std::set<int> commonSnds;
     if (roomSort) {
         // Per-frame image-handle sets from the parsed game data: every
         // instance's object -> animation cells / backdrop / counter frames.
@@ -355,33 +376,155 @@ void RecompPack::execute(GameData& game) {
         Logger::log("Recomp Pack: room-sorted blob order: " +
                     std::to_string(commonImgs.size()) + " common images, " +
                     std::to_string(frameImgs.size()) + " frame runs");
+
+        // ---- v2.81: per-frame SOUND sets from the parsed event program ----
+        // Every Kind::Sample parameter (codes 6/7/35/36 — conditions and
+        // actions alike) carries a sound bank handle; the per-frame sets feed
+        // the port's async preload the same way frameImages does.
+        frameSnds.assign(game.frames.size(), std::set<int>());
+        std::map<int, int> sndHandleToOrdinal;
+        {
+            int ordinal = 0;
+            for (const auto& item : game.sounds.items) {
+                if (!item) continue;
+                sndHandleToOrdinal[(int)item->handle] = ordinal++;
+            }
+        }
+        for (size_t fi = 0; fi < game.frames.size(); ++fi) {
+            if (!game.frames[fi]->events) continue;
+            std::set<int>& snds = frameSnds[fi];
+            for (const auto& g : game.frames[fi]->events->groups) {
+                for (const auto& c : g.conditions)
+                    for (const auto& p : c.parameters)
+                        if (p.kind == Parameter::Kind::Sample) {
+                            auto it = sndHandleToOrdinal.find((int)p.sampleHandle);
+                            if (it != sndHandleToOrdinal.end()) snds.insert(it->second);
+                        }
+                for (const auto& a : g.actions)
+                    for (const auto& p : a.parameters)
+                        if (p.kind == Parameter::Kind::Sample) {
+                            auto it = sndHandleToOrdinal.find((int)p.sampleHandle);
+                            if (it != sndHandleToOrdinal.end()) snds.insert(it->second);
+                        }
+            }
+        }
+        std::map<int, int> sndUseCount;
+        for (const auto& snds : frameSnds)
+            for (int s : snds) ++sndUseCount[s];
+        for (const auto& u : sndUseCount)
+            if (u.second >= 2) commonSnds.insert(u.first);
+        size_t sndFrames = 0;
+        for (const auto& snds : frameSnds) if (!snds.empty()) ++sndFrames;
+        Logger::log("Recomp Pack: per-frame sounds: " +
+                    std::to_string(commonSnds.size()) + " common sounds, " +
+                    std::to_string(sndFrames) + " frames with sounds");
     }
 
     // ---------------- sounds
+    // Ordinary WAV sources keep their complete RIFF/WAVE blob. MP3 sources
+    // stay compressed: the game's dr_mp3 adapter decodes them on playback.
+    // Ogg still becomes a canonical PCM16 WAV here because the runtime has
+    // no Vorbis decoder. Sample rates are never changed by the packer.
     std::vector<PakSoundSpec> sounds;
     sounds.reserve(game.sounds.items.size());
     uint64_t sndBytes = 0;
-    size_t pcmCount = 0, passthroughCount = 0;
+    size_t pcmCount = 0, passthroughCount = 0, convertedCount = 0;
+    size_t runtimeMp3Count = 0;
     for (const auto& item : game.sounds.items) {
         if (!item) continue;
         PakSoundSpec s;
         s.name = "snd_" + baseNameNoExt(item->name);
-        uint32_t rate = 0, channels = 0, bits = 0;
+        const AudioKind kind = sniffAudioKind(item->data);
+        s.sourceFormat = audioKindName(kind);
+        uint32_t rate = 0, channels = 0, bits = 16;
         size_t off = 0, size = 0;
         std::string werr;
-        if (parseWav(item->data, rate, channels, bits, off, size, werr)) {
-            s.fmt = 0; // raw PCM
+        if (kind == AudioKind::WavPcm && parseWav(item->data, rate, channels, bits, off, size, werr)) {
+            // v2.92: keep the WHOLE RIFF/WAVE file in the pak. The header
+            // carries the ORIGINAL rate/channels/bit depth the Clickteam
+            // app used, so the runtime reads them from there — the same
+            // path FNAF1 always took (no extra field in the pak table,
+            // no guessing). An 8-bit source stays 8-bit in the pak and is
+            // expanded to 16-bit by the runtime at load time.
+            s.fmt = 0;
             s.sampleRate = rate;
             s.channels = channels;
-            s.data.assign(item->data.begin() + off, item->data.begin() + off + size);
-            ++pcmCount;
-        } else {
-            s.fmt = 2; // passthrough (format recorded for future players)
+            s.bits = bits;
             s.data = item->data;
-            ++passthroughCount;
+            ++pcmCount;
+        } else if (kind == AudioKind::Mp3) {
+            // Keep the exact compressed bytes. fmt=2 tells the game to use
+            // dr_mp3; rate/channels are decoder output, not table metadata.
+            s.fmt = 2;
+            s.sampleRate = 0;
+            s.channels = 0;
+            s.bits = 0;
+            s.data = item->data;
+            ++runtimeMp3Count;
+        } else {
+            // Ogg and any other decodable source: make a canonical PCM16 WAV.
+            std::vector<uint8_t> pcm;
+            std::string tool, derr;
+            if (decodeToPcm16(item->data, kind, rate, channels, pcm, tool, derr)) {
+                s.fmt = 0;
+                s.sampleRate = rate;
+                s.channels = channels;
+                s.bits = 16;
+                s.data = WavWriter::buildWav(1, (uint16_t)channels, rate,
+                                             rate * channels * 2,
+                                             (uint16_t)(channels * 2), 16, pcm);
+                ++pcmCount;
+                if (!tool.empty()) ++convertedCount;
+            } else {
+                // Undecodable source: keep the bytes as they are. The runtime
+                // marks such an entry unsupported and skips it in silence —
+                // much better than handing compressed bytes to XAudio2 as PCM.
+                s.fmt = 2;            // passthrough
+                s.bits = 0;           // unknown bit depth
+                s.sampleRate = 44100;  // metadata only; the sound stays silent
+                s.channels = 2;
+                s.data = item->data;
+                ++passthroughCount;
+                Logger::log("Recomp Pack: cannot decode '" + s.name + "' (" +
+                            s.sourceFormat + "): " + derr + " — kept as passthrough");
+            }
         }
         sndBytes += s.data.size();
         sounds.push_back(std::move(s));
+    }
+
+    // v2.81: room-sort the SOUND blobs with the same three-phase scheme
+    // (COMMON used by >= 2 frames, then each frame's run in frame order).
+    // The port reads sounds by name, so the reorder is invisible to it; a
+    // room's sounds then read sequentially behind the same transitions.
+    std::vector<int> sndOrdinalToNew;   // old ordinal -> new pak position
+    if (roomSort && !frameSnds.empty() && !sounds.empty()) {
+        std::vector<bool> placed(sounds.size(), false);
+        std::vector<int> oldOrdinalOfNew;   // new position -> old ordinal
+        oldOrdinalOfNew.reserve(sounds.size());
+        auto placeSnd = [&](int ordinal) {
+            if (ordinal < 0 || ordinal >= (int)sounds.size()) return;
+            if (placed[ordinal]) return;
+            placed[ordinal] = true;
+            oldOrdinalOfNew.push_back(ordinal);
+        };
+        for (int s : commonSnds) placeSnd(s);
+        for (const auto& snds : frameSnds)
+            for (int s : snds) placeSnd(s);
+        for (size_t i = 0; i < sounds.size(); ++i)
+            if (!placed[i]) { placed[i] = true; oldOrdinalOfNew.push_back((int)i); }
+
+        sndOrdinalToNew.assign(sounds.size(), -1);
+        for (size_t n = 0; n < oldOrdinalOfNew.size(); ++n)
+            sndOrdinalToNew[oldOrdinalOfNew[n]] = (int)n;
+
+        std::vector<PakSoundSpec> ordered;
+        ordered.reserve(sounds.size());
+        for (int old : oldOrdinalOfNew) ordered.push_back(sounds[old]);
+        sounds.swap(ordered);
+        Logger::log("Recomp Pack: room-sorted sound order: " +
+                    std::to_string(commonSnds.size()) + " common sounds, " +
+                    std::to_string(sounds.size()) + " total");
     }
 
     // ---------------- assemble + write pak
@@ -490,6 +633,33 @@ void RecompPack::execute(GameData& game) {
         }
         mapping += "\nstatic const FrameImages frameImages[] = {\n" + rows + "};\n";
         mapping += "const int FRAME_COUNT = (int)(sizeof(frameImages) / sizeof(frameImages[0]));\n";
+
+        // v2.81: the per-frame SOUND preload table (pak sound-table indices,
+        // ascending by pak position). Consumed by PakLoader::PreloadSoundIndices.
+        mapping += "\n// Streaming sound-preload table (room-sorted pak): per frame, the pak\n"
+                   "// sound indices of the frame's event-referenced sounds. See\n"
+                   "// PakLoader::PreloadSoundIndices.\n"
+                   "struct FrameSounds { int frame; int count; const int* sounds; };\n";
+        std::string sndRows;
+        for (size_t fi = 0; fi < frameSnds.size(); ++fi) {
+            std::vector<int> idxs;
+            for (int s : frameSnds[fi])
+                if (s >= 0 && s < (int)sndOrdinalToNew.size() && sndOrdinalToNew[s] >= 0)
+                    idxs.push_back(sndOrdinalToNew[s]);
+            if (idxs.empty()) continue;
+            std::sort(idxs.begin(), idxs.end());
+            std::string arrName = "f" + std::to_string(fi) + "_snds";
+            mapping += "static const int " + arrName + "[] = {";
+            for (size_t k = 0; k < idxs.size(); ++k) {
+                mapping += (k % 16 == 0 ? "\n    " : " ");
+                mapping += std::to_string(idxs[k]) + ",";
+            }
+            mapping += "\n};\n";
+            sndRows += "    { " + std::to_string(fi) + ", " +
+                       std::to_string(idxs.size()) + ", " + arrName + " },\n";
+        }
+        mapping += "\nstatic const FrameSounds frameSounds[] = {\n" + sndRows + "};\n";
+        mapping += "const int FRAME_SOUND_COUNT = (int)(sizeof(frameSounds) / sizeof(frameSounds[0]));\n";
     }
     mapping += "} // namespace " + gameId + "\n";
     std::FILE* mf = std::fopen(pathJoin(dir, "asset_mapping_" + gameId + ".hpp").c_str(), "wb");
@@ -521,11 +691,12 @@ void RecompPack::execute(GameData& game) {
         const auto& s = sounds[i];
         char entry[256];
         std::snprintf(entry, sizeof(entry),
-                      "    {\"name\": \"%s\", \"format\": \"%s\", \"sampleRate\": %u, "
-                      "\"channels\": %u, \"bytes\": %u}%s\n",
+                      "    {\"name\": \"%s\", \"format\": \"%s\", \"sourceFormat\": \"%s\", "
+                      "\"sampleRate\": %u, \"channels\": %u, \"bits\": %u, \"bytes\": %u}%s\n",
                       jsonEscapeCopy(s.name).c_str(),
-                      s.fmt == 0 ? "PCM" : "passthrough",
-                      s.sampleRate, s.channels,
+                      s.fmt == 0 ? "PCM" : (s.sourceFormat == "mp3" ? "MP3 (runtime)" : "passthrough"),
+                      jsonEscapeCopy(s.sourceFormat).c_str(),
+                      s.sampleRate, s.channels, s.bits,
                       static_cast<unsigned>(s.data.size()),
                       i + 1 < sounds.size() ? "," : "");
         json += entry;
@@ -549,6 +720,33 @@ void RecompPack::execute(GameData& game) {
         }
         json += "\n  ]";
     }
+    if (roomSort) {
+        // v2.81: the per-frame sound lists (sound bank handles, for analysis
+        // parity with the "frames" image lists; the header carries the pak
+        // indices). frameSnds holds OLD ordinals — map them back to handles.
+        json += ",\n  \"frameSounds\": [\n";
+        std::vector<int> ordinalToHandle;
+        ordinalToHandle.reserve(game.sounds.items.size());
+        for (const auto& item : game.sounds.items) {
+            if (!item) continue;
+            ordinalToHandle.push_back((int)item->handle);
+        }
+        bool firstSndFrame = true;
+        for (size_t fi = 0; fi < frameSnds.size(); ++fi) {
+            if (frameSnds[fi].empty()) continue;
+            json += firstSndFrame ? "" : ",\n";
+            firstSndFrame = false;
+            json += "    {\"frame\": " + std::to_string(fi) + ", \"sounds\": [";
+            bool firstS = true;
+            for (int s : frameSnds[fi]) {
+                int h = (s >= 0 && s < (int)ordinalToHandle.size()) ? ordinalToHandle[s] : -1;
+                json += (firstS ? "" : ", ") + std::to_string(h);
+                firstS = false;
+            }
+            json += "]}";
+        }
+        json += "\n  ]";
+    }
     json += "\n}\n";
     std::FILE* jf = std::fopen(pathJoin(dir, "pak_manifest.json").c_str(), "wb");
     if (jf) { std::fwrite(json.data(), 1, json.size(), jf); std::fclose(jf); }
@@ -556,9 +754,11 @@ void RecompPack::execute(GameData& game) {
     char summary[256];
     std::snprintf(summary, sizeof(summary),
                   "Recomp Pack done: %zu textures (%zu DXT1, %zu DXT5, %.1f MB), "
-                  "%zu sounds (%zu PCM, %zu passthrough, %.1f MB), pak %.1f MB -> %s",
+                  "%zu sounds (%zu PCM, %zu converted, %zu MP3-runtime, %zu passthrough, %.1f MB), "
+                  "pak %.1f MB -> %s",
                   textures.size(), dxt1Count, dxt5Count, texBytes / 1048576.0,
-                  sounds.size(), pcmCount, passthroughCount, sndBytes / 1048576.0,
+                  sounds.size(), pcmCount, convertedCount, runtimeMp3Count, passthroughCount,
+                  sndBytes / 1048576.0,
                   pak.size() / 1048576.0, pakPath.c_str());
     Logger::log(summary);
 }
