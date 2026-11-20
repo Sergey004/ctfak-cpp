@@ -1,9 +1,7 @@
-// AudioDecoder.cpp — see AudioDecoder.h.
+// AudioDecoder.cpp — in-process audio decoding only.
 
 #include "AudioDecoder.h"
-#include "Utils.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -32,8 +30,6 @@ bool looksLikeMpegFrame(const std::vector<uint8_t>& d) {
     if (d.size() < 4) return false;
     if (d[0] != 0xFF) return false;
     if ((d[1] & 0xE0) != 0xE0) return false;
-    // The layer bits must not be 0 (reserved) and the version bits must not
-    // be 1 (reserved) — otherwise this is not an MPEG audio frame at all.
     const int version = (d[1] >> 3) & 3;
     const int layer   = (d[1] >> 1) & 3;
     if (version == 1) return false;
@@ -41,7 +37,6 @@ bool looksLikeMpegFrame(const std::vector<uint8_t>& d) {
     return true;
 }
 
-// Result of a RIFF/WAVE walk.
 struct WavInfo {
     bool        ok = false;
     uint16_t    format = 0;
@@ -91,66 +86,6 @@ void expandU8ToS16(const uint8_t* src, size_t n, std::vector<uint8_t>& out) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// External decoder plumbing
-//
-// The compressed formats are decoded with the platform's own media tool.
-// The blob goes into a temporary file, the tool turns it into a plain WAV,
-// and only the WAV is read back. Nothing of the tool ends up in this
-// repository, and the PCM is the reference decoder's own output.
-// ---------------------------------------------------------------------------
-
-std::string tempPath(const char* stem, const char* ext) {
-    // The temp directory is resolved through the environment so the tool
-    // works the same on Linux and Windows.
-    const char* dir = std::getenv("TMPDIR");
-    if (!dir || !*dir) dir = std::getenv("TEMP");
-    if (!dir || !*dir) dir = std::getenv("TMP");
-    if (!dir || !*dir) dir = ".";
-    std::string base = std::string(dir);
-    if (base.back() != '/' && base.back() != '\\') base += '/';
-    base += "ctfak_audio_";
-    base += stem;
-    base += ext;
-    return base;
-}
-
-// Runs a command and reports whether it succeeded. The paths are generated
-// by this tool (no user input reaches them), but they are still quoted so
-// a temp directory with spaces cannot break the call.
-bool runCommand(const std::string& cmd) {
-    std::FILE* p = popen(cmd.c_str(), "r");
-    if (!p) return false;
-    // Drain the output so the child never blocks on a full pipe.
-    char buf[512];
-    while (std::fgets(buf, sizeof(buf), p)) { /* discard */ }
-    const int rc = pclose(p);
-    return rc == 0;
-}
-
-bool haveTool(const char* name) {
-    const std::string cmd = std::string("command -v ") + name + " >/dev/null 2>&1";
-    if (runCommand(cmd)) return true;
-    const std::string cmd2 = std::string("where ") + name + " >nul 2>&1";
-    return runCommand(cmd2);
-}
-
-// Runs ffmpeg/sox to turn `inPath` into a WAV at `outPath`.
-bool runExternalDecoder(const std::string& inPath, const std::string& outPath,
-                        std::string& usedTool) {
-    if (haveTool("ffmpeg")) {
-        const std::string cmd = "ffmpeg -v quiet -y -i \"" + inPath +
-                                "\" -f wav \"" + outPath + "\" >/dev/null 2>&1";
-        if (runCommand(cmd)) { usedTool = "ffmpeg"; return true; }
-    }
-    if (haveTool("sox")) {
-        const std::string cmd = "sox \"" + inPath + "\" -t wav \"" + outPath +
-                                "\" >/dev/null 2>&1";
-        if (runCommand(cmd)) { usedTool = "sox"; return true; }
-    }
-    return false;
-}
-
 } // namespace
 
 AudioKind sniffAudioKind(const std::vector<uint8_t>& data) {
@@ -197,10 +132,8 @@ bool decodeToPcm16(const std::vector<uint8_t>& data,
     tool.clear();
     err.clear();
     pcm.clear();
-
     if (data.empty()) { err = "empty blob"; return false; }
 
-    // ---- RIFF/WAVE: parsed in-process -------------------------------------
     if (kind == AudioKind::WavPcm) {
         const WavInfo w = parseRiffWav(data);
         if (!w.ok || !w.dataSize) { err = "malformed RIFF/WAVE"; return false; }
@@ -211,7 +144,7 @@ bool decodeToPcm16(const std::vector<uint8_t>& data,
             expandU8ToS16(data.data() + w.dataOff, w.dataSize, pcm);
         } else if (w.bits == 16) {
             pcm.assign(data.begin() + (long)w.dataOff,
-                        data.begin() + (long)(w.dataOff + w.dataSize));
+                       data.begin() + (long)(w.dataOff + w.dataSize));
         } else {
             err = "unsupported bit depth";
             return false;
@@ -219,46 +152,10 @@ bool decodeToPcm16(const std::vector<uint8_t>& data,
         return true;
     }
 
-    // ---- MP3 / Ogg: decoded by the platform's own media tool --------------
-    if (kind == AudioKind::Mp3 || kind == AudioKind::OggVorbis) {
-        const std::string inPath  = tempPath("in", kind == AudioKind::Mp3 ? ".mp3" : ".ogg");
-        const std::string outPath = tempPath("out", ".wav");
-        std::remove(inPath.c_str());
-        std::remove(outPath.c_str());
-        if (!writeFileBytes(inPath, data)) {
-            err = "cannot write the temporary input file";
-            return false;
-        }
-        std::string used;
-        const bool ok = runExternalDecoder(inPath, outPath, used);
-        std::remove(inPath.c_str());
-        if (!ok) {
-            std::remove(outPath.c_str());
-            err = "no MP3/Ogg decoder available (install ffmpeg or sox)";
-            return false;
-        }
-        std::vector<uint8_t> wav;
-        if (!readFileBytes(outPath, wav)) {
-            std::remove(outPath.c_str());
-            err = "cannot read the decoded file";
-            return false;
-        }
-        std::remove(outPath.c_str());
-
-        const WavInfo w = parseRiffWav(wav);
-        if (!w.ok || !w.dataSize || w.format != 1 || w.bits != 16) {
-            err = "the decoder did not produce 16-bit PCM";
-            return false;
-        }
-        sampleRate = w.sampleRate;
-        channels   = w.channels;
-        pcm.assign(wav.begin() + (long)w.dataOff,
-                   wav.begin() + (long)(w.dataOff + w.dataSize));
-        tool = used;
-        return true;
-    }
-
-    err = "unsupported audio format";
+    // MP3 is intentionally retained by RecompPack and decoded by the game.
+    // No current game bank contains Ogg; adding another decoder here would be
+    // dead code, so unsupported formats fail closed instead of invoking tools.
+    err = "unsupported audio format (MP3 is handled by the game runtime)";
     return false;
 }
 

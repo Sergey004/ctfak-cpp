@@ -9,9 +9,9 @@
 //   * RIFF/WAVE  — parsed in-process (PCM only; the game's banks carry
 //     nothing else, and the ADPCM variant the console also supports is not
 //     used by these games);
-//   * MP3 / Ogg  — this decoder can use the platform's media tool (ffmpeg,
-//     then sox), although Recomp Pack now bypasses it for MP3 and retains
-//     those bytes for the in-game dr_mp3. Ogg still takes this path.
+//   * MP3       — retained by Recomp Pack and decoded by the game runtime;
+//   * Ogg/other — rejected here. No external tools, decoder processes,
+//     temporary files, ffmpeg or sox are used.
 //
 // Nothing is resampled: the PCM keeps the source file's own sample rate and
 // channel count, so the conversion adds no artefacts of its own.
@@ -45,8 +45,7 @@ const char* audioKindName(AudioKind kind);
 // Decodes a blob to INTERLEAVED signed 16-bit little-endian PCM.
 // Returns false when the format cannot be decoded (the caller then keeps
 // the blob as-is and the sound stays silent instead of turning into noise).
-// `tool` receives the name of the external decoder that was used, or an
-// empty string when the conversion happened in-process.
+// `tool` is empty for direct RIFF/WAVE handling and for rejected formats.
 bool decodeToPcm16(const std::vector<uint8_t>& data,
                    AudioKind kind,
                    uint32_t& sampleRate,
