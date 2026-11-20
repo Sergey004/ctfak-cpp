@@ -52,9 +52,16 @@ inspired by CTFAK 2.0 (C#) but shares no code with it.
     gradient Quick Backdrops, and the CTF inverse transparency coefficient
     (`0 = opaque`, `255 = invisible`). No grid, wireframe or debug font is drawn.
     Each PNG has a text report naming unsupported text/TTF and custom HWA cases.
+    **Perspective** extensions use their serialized 28-byte EDATA: width,
+    height, zoom, effect and direction. Only the proven **PANORAMA/HORIZONTAL**
+    mode (`effect=0`, `direction=0`) is applied after its composed layer, using
+    the same CPU parabola as the game port (`curve=4`). This covers the exact
+    per-game variants (FNAF1 1324x754/300, FNAF2 1024x768/200, FNAF3
+    1048x790/150, SL/UCN/World variants). Other effect/direction modes and
+    custom HWA shaders remain explicitly reported instead of being guessed.
     This is the view before the first event/animation tick, **not** an event VM:
-    event actions, custom shaders, TTF rasterization and animation/scroll ticks
-    are explicitly reported rather than simulated.
+    event actions, other custom shaders, TTF rasterization and animation/scroll
+    ticks are explicitly reported rather than simulated.
   - *Events Listing* — the complete event program (conditions/actions) of every
     frame as a human readable text listing in the Fusion event-grid style:
     `ON`/`DO` lines with resolved object names, condition/action numbers, raw

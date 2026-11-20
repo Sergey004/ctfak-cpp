@@ -9,6 +9,7 @@
 #include "../format/ImageBank.h"
 #include "../format/ObjectInfo.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -206,17 +207,41 @@ void runtimeBlendImage(std::vector<uint8_t>& canvas, int cw, int ch,
     blendImageStyled(canvas, cw, ch, img, dstX, dstY, objectStyle(obj));
 }
 
+uint16_t readEdata16(const std::vector<uint8_t>& data, size_t offset) {
+    return static_cast<uint16_t>(data[offset]) |
+           static_cast<uint16_t>(data[offset + 1] << 8);
+}
+
+int32_t readEdata32(const std::vector<uint8_t>& data, size_t offset) {
+    return static_cast<int32_t>(static_cast<uint32_t>(data[offset]) |
+                                (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                                (static_cast<uint32_t>(data[offset + 2]) << 16) |
+                                (static_cast<uint32_t>(data[offset + 3]) << 24));
+}
+
 RuntimePerspectiveGeometry runtimePerspectiveGeometry(const ObjectInstance& inst,
+                                                       const ObjectInfo& obj,
                                                        int windowW, int windowH) {
-    // FNAF1's serialized object is 1324x754 at (-22,-22). Deriving the size
-    // from those margins yields the same values, and keeps other viewports
-    // from inheriting a hardcoded 1280x720 rectangle.
     const float orgX = static_cast<float>(inst.x), orgY = static_cast<float>(inst.y);
-    const float objW = static_cast<float>(windowW) - 2.0f * std::min(orgX, 0.0f);
-    const float objH = static_cast<float>(windowH) - 2.0f * std::min(orgY, 0.0f);
+    float objW = static_cast<float>(windowW) - 2.0f * std::min(orgX, 0.0f);
+    float objH = static_cast<float>(windowH) - 2.0f * std::min(orgY, 0.0f);
+    int effect = 0, direction = 0;
+    float zoom = 300.0f;
+    if (obj.common && obj.common->extension.data.size() >= 28) {
+        const auto& edata = obj.common->extension.data;
+        objW = readEdata16(edata, 4);
+        objH = readEdata16(edata, 6);
+        effect = edata[8];
+        direction = edata[9];
+        zoom = static_cast<float>(readEdata32(edata, 12));
+    } else if (windowW == 1280 && windowH == 720 && inst.x == -22 && inst.y == -22) {
+        // Exact FNAF1 fallback for synthetic objects without an EDATA blob.
+        objW = 1324.0f;
+        objH = 754.0f;
+    }
     return { objW, objH, orgX, orgY,
              static_cast<float>(windowW), static_cast<float>(windowH),
-             300.0f, orgY + objH * 0.5f, 4.0f };
+             zoom, orgY + objH * 0.5f, 4.0f, effect, direction };
 }
 
 void runtimeApplyPerspective(std::vector<uint8_t>& canvas, int cw, int ch,
@@ -247,6 +272,14 @@ void runtimeApplyPerspective(std::vector<uint8_t>& canvas, int cw, int ch,
                 dp[c] = samplePerspectiveChannel(source, cw, ch, sx, sy, c);
         }
     }
+}
+
+bool isPerspectiveObject(const ObjectInfo& obj) {
+    if (obj.objectType < 32) return false;
+    std::string name;
+    name.reserve(obj.name.size());
+    for (unsigned char c : obj.name) name.push_back(static_cast<char>(std::tolower(c)));
+    return name.find("perspective") == 0 || name.find("perpective") == 0;
 }
 
 void FrameRuntimeRenderer::execute(GameData& game) {
@@ -281,8 +314,7 @@ void FrameRuntimeRenderer::execute(GameData& game) {
 
         RuntimeReport stats;
         std::string notes;
-        int perspectiveLayer = -1;
-        RuntimePerspectiveGeometry perspectiveGeom{};
+        std::vector<std::pair<int, RuntimePerspectiveGeometry>> perspectivePasses;
         size_t cursor = 0;
         while (cursor < instances.size()) {
             const int16_t layerIndex = instances[cursor]->layer;
@@ -332,9 +364,17 @@ void FrameRuntimeRenderer::execute(GameData& game) {
                     ++stats.customShaders;
                 }
 
-                if (obj->objectType == kObjExtension && obj->name == "Perspective") {
-                    perspectiveLayer = inst.layer;
-                    perspectiveGeom = runtimePerspectiveGeometry(inst, W, H);
+                if (isPerspectiveObject(*obj)) {
+                    const auto geometry = runtimePerspectiveGeometry(inst, *obj, W, H);
+                    if (geometry.effect == 0 && geometry.direction == 0) {
+                        perspectivePasses.push_back({inst.layer, geometry});
+                    } else {
+                        notes += "object '" + obj->name + "' Perspective effect " +
+                                 std::to_string(geometry.effect) + " direction " +
+                                 std::to_string(geometry.direction) +
+                                 " not implemented (only PANORAMA/HORIZONTAL)\n";
+                        ++stats.customShaders;
+                    }
                     continue;
                 }
 
@@ -373,13 +413,20 @@ void FrameRuntimeRenderer::execute(GameData& game) {
                 if (layer->effect != 0) applyEffectToLayer(layerCanvas, coeff);
             }
             compositeLayer(canvas, layerCanvas);
-            if (perspectiveLayer == layerIndex) {
-                runtimeApplyPerspective(canvas, W, H, perspectiveGeom);
+            for (const auto& pass : perspectivePasses) {
+                if (pass.first != layerIndex) continue;
+                runtimeApplyPerspective(canvas, W, H, pass.second);
                 notes += "Perspective applied after layer " + std::to_string(layerIndex) +
-                         " (CPU parabola, zoom 300, curve 4)\n";
+                         " (PANORAMA/HORIZONTAL, zoom " +
+                         std::to_string(static_cast<int>(pass.second.zoom)) +
+                         ", " + std::to_string(static_cast<int>(pass.second.objW)) + "x" +
+                         std::to_string(static_cast<int>(pass.second.objH)) + ")\n";
                 ++stats.perspectivePasses;
-                perspectiveLayer = -1;
             }
+            perspectivePasses.erase(
+                std::remove_if(perspectivePasses.begin(), perspectivePasses.end(),
+                               [layerIndex](const auto& pass) { return pass.first == layerIndex; }),
+                perspectivePasses.end());
             cursor = end;
         }
 

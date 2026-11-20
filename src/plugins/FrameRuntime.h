@@ -19,9 +19,11 @@ struct ImageItem;
 struct RuntimePerspectiveGeometry {
     float objW, objH, orgX, orgY, winW, winH;
     float zoom, centerY, curve;
+    int effect, direction;
 };
 
 RuntimePerspectiveGeometry runtimePerspectiveGeometry(const ObjectInstance& inst,
+                                                       const ObjectInfo& obj,
                                                        int windowW, int windowH);
 void runtimeApplyPerspective(std::vector<uint8_t>& canvas, int cw, int ch,
                              const RuntimePerspectiveGeometry& geometry);

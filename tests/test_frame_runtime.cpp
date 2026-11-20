@@ -133,3 +133,71 @@ TEST(frame_runtime_tint_is_applied) {
     EXPECT_EQ(canvas[1], 0);
     EXPECT_EQ(canvas[2], 0);
 }
+
+TEST(frame_runtime_perspective_serialized_geometry) {
+    ObjectInstance inst;
+    inst.x = -22;
+    inst.y = -22;
+    auto obj = makeObject();
+    const auto g = runtimePerspectiveGeometry(inst, obj, 1280, 720);
+    EXPECT_EQ(g.objW, 1324.0f);
+    EXPECT_EQ(g.objH, 754.0f);
+    EXPECT_EQ(g.orgX, -22.0f);
+    EXPECT_EQ(g.orgY, -22.0f);
+    EXPECT_EQ(g.centerY, 355.0f);
+    EXPECT_EQ(g.zoom, 300.0f);
+    EXPECT_EQ(g.curve, 4.0f);
+    EXPECT_EQ(g.effect, 0);
+    EXPECT_EQ(g.direction, 0);
+}
+
+TEST(frame_runtime_perspective_reads_edata_and_effect_mode) {
+    ObjectInstance inst;
+    auto obj = makeObject();
+    auto& data = obj.common->extension.data;
+    data.assign(28, 0);
+    auto put16 = [&](size_t at, uint16_t value) {
+        data[at] = static_cast<uint8_t>(value);
+        data[at + 1] = static_cast<uint8_t>(value >> 8);
+    };
+    auto put32 = [&](size_t at, uint32_t value) {
+        for (int i = 0; i < 4; ++i) data[at + i] = static_cast<uint8_t>(value >> (i * 8));
+    };
+    put16(4, 1024);
+    put16(6, 768);
+    data[8] = 1;
+    data[9] = 1;
+    put32(12, 200);
+    const auto g = runtimePerspectiveGeometry(inst, obj, 1024, 768);
+    EXPECT_EQ(g.objW, 1024.0f);
+    EXPECT_EQ(g.objH, 768.0f);
+    EXPECT_EQ(g.zoom, 200.0f);
+    EXPECT_EQ(g.effect, 1);
+    EXPECT_EQ(g.direction, 1);
+}
+
+TEST(frame_runtime_perspective_zero_zoom_is_identity) {
+    std::vector<uint8_t> canvas;
+    for (int i = 0; i < 16; ++i) {
+        canvas.push_back(static_cast<uint8_t>(i * 10));
+        canvas.push_back(static_cast<uint8_t>(255 - i * 10));
+        canvas.push_back(static_cast<uint8_t>(i * 3));
+        canvas.push_back(255);
+    }
+    const auto original = canvas;
+    const RuntimePerspectiveGeometry identity{4, 4, 0, 0, 4, 4, 0, 2, 4, 0, 0};
+    runtimeApplyPerspective(canvas, 4, 4, identity);
+    EXPECT_TRUE(canvas == original);
+}
+
+TEST(frame_runtime_perspective_clamps_source_edges) {
+    auto canvas = blackCanvas(8, 8);
+    ObjectInstance inst;
+    inst.x = -2;
+    inst.y = -2;
+    auto obj = makeObject();
+    const auto g = runtimePerspectiveGeometry(inst, obj, 8, 8);
+    runtimeApplyPerspective(canvas, 8, 8, g);
+    EXPECT_EQ(canvas.size(), 8 * 8 * 4);
+    for (size_t i = 3; i < canvas.size(); i += 4) EXPECT_EQ(canvas[i], 255);
+}
