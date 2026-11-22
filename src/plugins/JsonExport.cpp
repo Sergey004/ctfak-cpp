@@ -360,6 +360,13 @@ static JsonPtr objectJson(const ObjectInfo& oi) {
             }
             common->set("animations", std::move(anims));
         }
+        if (c.hasCounterConfig) {
+            auto cfg = JsonValue::makeObject();
+            cfg->set("initial", JsonValue::makeInt(c.counterInitial));
+            cfg->set("minimum", JsonValue::makeInt(c.counterMinimum));
+            cfg->set("maximum", JsonValue::makeInt(c.counterMaximum));
+            common->set("counterConfig", std::move(cfg));
+        }
         if (c.counter) {
             auto cnt = JsonValue::makeObject();
             cnt->set("displayType", JsonValue::makeInt(c.counter->displayType));

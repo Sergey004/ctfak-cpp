@@ -59,9 +59,37 @@ inspired by CTFAK 2.0 (C#) but shares no code with it.
     per-game variants (FNAF1 1324x754/300, FNAF2 1024x768/200, FNAF3
     1048x790/150, SL/UCN/World variants). Other effect/direction modes and
     custom HWA shaders remain explicitly reported instead of being guessed.
-    This is the view before the first event/animation tick, **not** an event VM:
-    event actions, other custom shaders, TTF rasterization and animation/scroll
-    ticks are explicitly reported rather than simulated.
+    The renderer then evaluates **Start of Frame / always event groups** once:
+    counters (with serialized initial values), alterables, show/hide, positions,
+    animation selection, and event-set alpha coefficients are applied to the
+    first-tick state. Group selection is per-instance; unsupported groups fail
+    closed and are reported rather than partially modifying state. Input, timer
+    and audio-state conditions (key pressed/released, mouse clicks/over,
+    "after/every N", player controls, sample playing) are **deterministic at
+    the first tick**: FALSE while not negated, TRUE when negated — the faithful
+    no-input/no-elapsed-timer answer, which un-skips ~2.7k groups across the
+    seven dumped games (unsupported groups 5912 -> 3241). Active condition
+    (2,-2) is **"animation N has finished playing"**, NOT "animation == N" —
+    the earlier misreading fired mid-game UI chains at tick 0 (FNAF2's office
+    showed Mangle because the monitor-flip restore chain set viewing=9). This
+    is still **not** a full CTF VM: timer ticks, scroll ticks, audio and other
+    custom HWA shaders are reported, and TTF text is not rasterized.
+    Active condition **(2,-4) is "collision with another object"** and is now
+    evaluated honestly: the serialized first tick has positions, so the
+    evaluator computes a real AABB overlap between the owner instances and the
+    target instances (instance x/y plus the start image's size/hotspot — the
+    same anchor the renderer draws at). FNAF4 builds its whole position system
+    on it ("plushtrap" collides with the "in chair"/"hall stage N" zone
+    objects; FNAF2's "your view" collides with "paper pals" as the camera
+    visibility test). Active condition **(2,-16) is the Y-position compare**
+    (the mirror of the X compare -17): FNAF3's "hitbox" tests its Y against
+    the player's Y +/- 384, "top jaw" tests Y 0/-710, the blueprint-mode
+    "scroll" tests the Y band 540..1620. The expression operand
+    **`Object(info=N, list=I, num=80)`** (the object's alterable value I —
+    3867 references in the dumps, e.g. FNAF4's AI level
+    `Object(info=56, list=0, num=80)`) is evaluated as well. The other object
+    slots (81/82/1/11/...) and the remaining unproven Active conditions
+    (-32/-23/-7/-22/-8/-3/-1) still fail closed and are reported.
   - *Events Listing* — the complete event program (conditions/actions) of every
     frame as a human readable text listing in the Fusion event-grid style:
     `ON`/`DO` lines with resolved object names, condition/action numbers, raw

@@ -15,6 +15,25 @@ void ExpressionItem::read(BinaryReader& reader) {
 
     int16_t size = reader.readI16();
 
+    // Editor expression tokens are embedded in the same item stream. They
+    // have no payload: the header itself identifies the operator or bracket.
+    if (objectType == 0 && num != 0) {
+        kind = Kind::Operator;
+        longValue = num;
+        reader.seek(start + size);
+        return;
+    }
+    if (objectType == -1 && (num == 1 || num == -1)) {
+        kind = Kind::ParenOpen;
+        reader.seek(start + size);
+        return;
+    }
+    if (objectType == -1 && num == -2) {
+        kind = Kind::ParenClose;
+        reader.seek(start + size);
+        return;
+    }
+
     if (objectType == -1) { // system expressions
         switch (num) {
             case 0:
@@ -65,6 +84,9 @@ std::string ExpressionItem::describe() const {
         case Kind::Global: return "GlobalValue(" + std::to_string(globalValue) + ")";
         case Kind::Extension: return "Ext(objectInfo=" + std::to_string(objectInfo) + ", value=" +
                                      std::to_string(extensionValue) + ")";
+        case Kind::Operator: return "op(" + std::to_string(longValue) + ")";
+        case Kind::ParenOpen: return "(";
+        case Kind::ParenClose: return ")";
         case Kind::Object:
             return "Object(info=" + std::to_string(objectInfo) + ", list=" +
                    std::to_string(objectInfoList) + ", num=" + std::to_string(num) + ")";

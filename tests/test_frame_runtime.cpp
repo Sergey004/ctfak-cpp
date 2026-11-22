@@ -139,7 +139,7 @@ TEST(frame_runtime_perspective_serialized_geometry) {
     inst.x = -22;
     inst.y = -22;
     auto obj = makeObject();
-    const auto g = runtimePerspectiveGeometry(inst, obj, 1280, 720);
+    const auto g = runtimePerspectiveGeometry(inst.x, inst.y, obj, 1280, 720);
     EXPECT_EQ(g.objW, 1324.0f);
     EXPECT_EQ(g.objH, 754.0f);
     EXPECT_EQ(g.orgX, -22.0f);
@@ -168,7 +168,7 @@ TEST(frame_runtime_perspective_reads_edata_and_effect_mode) {
     data[8] = 1;
     data[9] = 1;
     put32(12, 200);
-    const auto g = runtimePerspectiveGeometry(inst, obj, 1024, 768);
+    const auto g = runtimePerspectiveGeometry(inst.x, inst.y, obj, 1024, 768);
     EXPECT_EQ(g.objW, 1024.0f);
     EXPECT_EQ(g.objH, 768.0f);
     EXPECT_EQ(g.zoom, 200.0f);
@@ -196,8 +196,25 @@ TEST(frame_runtime_perspective_clamps_source_edges) {
     inst.x = -2;
     inst.y = -2;
     auto obj = makeObject();
-    const auto g = runtimePerspectiveGeometry(inst, obj, 8, 8);
+    const auto g = runtimePerspectiveGeometry(inst.x, inst.y, obj, 8, 8);
     runtimeApplyPerspective(canvas, 8, 8, g);
     EXPECT_EQ(canvas.size(), 8 * 8 * 4);
     for (size_t i = 3; i < canvas.size(); i += 4) EXPECT_EQ(canvas[i], 255);
+}
+
+TEST(frame_runtime_solid_image_detection) {
+    ImageItem solid;
+    solid.width = 4;
+    solid.height = 4;
+    solid.rgba.assign(static_cast<size_t>(4) * 4 * 4, 0);  // opaque black
+    EXPECT_TRUE(isSolidImage(solid));
+    ImageItem solidWhite = solid;
+    solidWhite.rgba.assign(static_cast<size_t>(4) * 4 * 4, 255);
+    EXPECT_TRUE(isSolidImage(solidWhite));
+    // real art: a differing pixel inside the sampled grid breaks it
+    ImageItem art = solid;
+    art.rgba[(2 * 4 + 2) * 4] = 90;  // the exact center pixel
+    EXPECT_TRUE(!isSolidImage(art));
+    ImageItem empty;
+    EXPECT_TRUE(!isSolidImage(empty));
 }

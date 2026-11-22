@@ -16,10 +16,13 @@ struct ExpressionItem {
     int16_t objectInfo = 0;
     int16_t objectInfoList = 0;
 
-    enum class Kind { None, Long, String, Double, Global, Extension, Object };
+    enum class Kind {
+        None, Long, String, Double, Global, Extension, Object,
+        Operator, ParenOpen, ParenClose
+    };
     Kind kind = Kind::None;
 
-    int32_t longValue = 0;
+    int32_t longValue = 0; // numeric constant or expression-operator opcode
     std::string stringValue;
     double doubleValue = 0;
     float floatValue = 0;

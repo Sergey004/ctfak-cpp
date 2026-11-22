@@ -164,6 +164,10 @@ struct ObjectCommon {
         int32_t totalSize = 0, version = 0, id = 0, priv = 0;
         std::vector<uint8_t> data;
     } extension;
+    // The trailing counter config (after the system-counter object) carries
+    // the runtime's initial/min/max; preserve it for event evaluation.
+    bool hasCounterConfig = false;
+    int32_t counterInitial = 0, counterMinimum = 0, counterMaximum = 0;
     std::unique_ptr<Shape> counterShapeless; // reserved
 
     // parent object type dispatches system object loaders

@@ -1,4 +1,5 @@
 #include "FrameRuntime.h"
+#include "FrameRuntimeEvents.h"
 #include "Dumpers.h"
 #include "../io/PngWriter.h"
 #include "../util/Config.h"
@@ -22,10 +23,12 @@ struct RuntimeStyle {
     float r, g, b, a;
 };
 
-RuntimeStyle objectStyle(const ObjectInfo& obj) {
+RuntimeStyle objectStyle(const ObjectInfo& obj, const RuntimeObjectState* state = nullptr) {
     const auto& c = obj.rgbCoeff;
-    return { c.r / 255.0f, c.g / 255.0f, c.b / 255.0f,
-             runtimeObjectAlpha(obj) / 255.0f };
+    const uint8_t alpha = (state && state->alphaOverride)
+                              ? static_cast<uint8_t>(state->alphaCoefficient)
+                              : runtimeObjectAlpha(obj);
+    return { c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, alpha / 255.0f };
 }
 
 void blendPixel(uint8_t* dp, float sr, float sg, float sb, float sa) {
@@ -156,6 +159,11 @@ struct RuntimeReport {
     int text = 0;
     int customShaders = 0;
     int perspectivePasses = 0;
+    int idlePlaceholders = 0;
+    int groupsExecuted = 0;
+    int groupsFalse = 0;
+    int groupsSkippedUnsupported = 0;
+    int countersInitialized = 0;
 };
 
 } // namespace
@@ -177,8 +185,55 @@ bool runtimeLayerVisibleAtStart(const Frame& frame, int16_t layer) {
     return frame.layers[layer].flags["Visible"];
 }
 
-int32_t resolveRuntimeStartImage(const ObjectInfo& obj) {
+int32_t resolveRuntimeStartImage(const ObjectInfo& obj, int animation, int direction) {
     if (obj.backdrop) return obj.backdrop->image;
+    if (!obj.common) return -1;
+    const auto& anims = obj.common->animations.items;
+    if (!anims.empty()) {
+        auto anim = animation >= 0 ? anims.find(animation) : anims.end();
+        if (anim == anims.end()) anim = anims.begin();
+        if (anim != anims.end()) {
+            auto dir = direction >= 0 ? anim->second.find(direction) : anim->second.end();
+            if (dir == anim->second.end()) dir = anim->second.begin();
+            if (dir != anim->second.end() && !dir->second.frames.empty())
+                return dir->second.frames.front();
+        }
+    }
+    if (obj.common->counter && !obj.common->counter->frames.empty())
+        return obj.common->counter->frames.front();
+    return -1;
+}
+
+// v2.98: TRUE when every sampled pixel of the image is the same RGBA value —
+// an "empty" animation-chain placeholder frame (FNAF4's solid-black attack
+// states, solid-black flash frames). Sampling every 8th pixel keeps this
+// cheap; real art never survives the grid with one exact color.
+bool isSolidImage(const ImageItem& img) {
+    if (img.width <= 0 || img.height <= 0 ||
+        img.rgba.size() < static_cast<size_t>(img.width) * img.height * 4)
+        return false;
+    const uint8_t* base = &img.rgba[0];
+    const int stepX = 8, stepY = 8;
+    for (int y = 0; y < img.height; y += stepY) {
+        const uint8_t* row = &img.rgba[static_cast<size_t>(y) * img.width * 4];
+        for (int x = 0; x < img.width; x += stepX) {
+            const uint8_t* p = row + static_cast<size_t>(x) * 4;
+            if (p[0] != base[0] || p[1] != base[1] ||
+                p[2] != base[2] || p[3] != base[3])
+                return false;
+        }
+    }
+    // the corners and the exact center too (the grid can miss a border band)
+    const uint8_t* last = &img.rgba[(static_cast<size_t>(img.height - 1) * img.width +
+                                     img.width - 1) * 4];
+    const uint8_t* mid = &img.rgba[(static_cast<size_t>(img.height / 2) * img.width +
+                                    img.width / 2) * 4];
+    return last[0] == base[0] && last[1] == base[1] && last[2] == base[2] &&
+           last[3] == base[3] && mid[0] == base[0] && mid[1] == base[1] &&
+           mid[2] == base[2] && mid[3] == base[3];
+}
+
+int32_t resolveRuntimeStartImage(const ObjectInfo& obj) {
     if (!obj.common) return -1;
     const auto& anims = obj.common->animations.items;
     if (!anims.empty()) {
@@ -204,7 +259,13 @@ BinaryReader::Color runtimeEffectCoeff(int16_t effect, BinaryReader::Color coeff
 void runtimeBlendImage(std::vector<uint8_t>& canvas, int cw, int ch,
                        const ImageItem& img, int dstX, int dstY,
                        const ObjectInfo& obj) {
-    blendImageStyled(canvas, cw, ch, img, dstX, dstY, objectStyle(obj));
+    runtimeBlendImage(canvas, cw, ch, img, dstX, dstY, obj, nullptr);
+}
+
+void runtimeBlendImage(std::vector<uint8_t>& canvas, int cw, int ch,
+                       const ImageItem& img, int dstX, int dstY,
+                       const ObjectInfo& obj, const RuntimeObjectState* state) {
+    blendImageStyled(canvas, cw, ch, img, dstX, dstY, objectStyle(obj, state));
 }
 
 uint16_t readEdata16(const std::vector<uint8_t>& data, size_t offset) {
@@ -219,10 +280,10 @@ int32_t readEdata32(const std::vector<uint8_t>& data, size_t offset) {
                                 (static_cast<uint32_t>(data[offset + 3]) << 24));
 }
 
-RuntimePerspectiveGeometry runtimePerspectiveGeometry(const ObjectInstance& inst,
+RuntimePerspectiveGeometry runtimePerspectiveGeometry(int instanceX, int instanceY,
                                                        const ObjectInfo& obj,
                                                        int windowW, int windowH) {
-    const float orgX = static_cast<float>(inst.x), orgY = static_cast<float>(inst.y);
+    const float orgX = static_cast<float>(instanceX), orgY = static_cast<float>(instanceY);
     float objW = static_cast<float>(windowW) - 2.0f * std::min(orgX, 0.0f);
     float objH = static_cast<float>(windowH) - 2.0f * std::min(orgY, 0.0f);
     int effect = 0, direction = 0;
@@ -234,7 +295,7 @@ RuntimePerspectiveGeometry runtimePerspectiveGeometry(const ObjectInstance& inst
         effect = edata[8];
         direction = edata[9];
         zoom = static_cast<float>(readEdata32(edata, 12));
-    } else if (windowW == 1280 && windowH == 720 && inst.x == -22 && inst.y == -22) {
+    } else if (windowW == 1280 && windowH == 720 && instanceX == -22 && instanceY == -22) {
         // Exact FNAF1 fallback for synthetic objects without an EDATA blob.
         objW = 1324.0f;
         objH = 754.0f;
@@ -304,22 +365,32 @@ void FrameRuntimeRenderer::execute(GameData& game) {
             canvas[i + 3] = 255;
         }
 
-        std::vector<const ObjectInstance*> instances;
-        instances.reserve(frame.objects.size());
-        for (const auto& inst : frame.objects) instances.push_back(&inst);
+        // Evaluate Start of Frame / always groups once, then render the final
+        // first-tick state instead of the serialized editor layout.
+        RuntimeReport stats;
+        RuntimeFrameState runtime = evaluateFrameStartEvents(frame, game);
+        stats.groupsExecuted = runtime.groupsExecuted;
+        stats.groupsFalse = runtime.groupsFalse;
+        stats.groupsSkippedUnsupported = runtime.groupsSkippedUnsupported;
+        stats.countersInitialized = static_cast<int>(runtime.counters.size());
+
+        std::vector<int> instances;
+        instances.reserve(runtime.objects.size());
+        for (int i = 0; i < static_cast<int>(runtime.objects.size()); ++i)
+            instances.push_back(i);
         std::stable_sort(instances.begin(), instances.end(),
-                         [](const ObjectInstance* a, const ObjectInstance* b) {
-                             return a->layer < b->layer;
+                         [&](int a, int b) {
+                             return runtime.objects[a].layer < runtime.objects[b].layer;
                          });
 
-        RuntimeReport stats;
-        std::string notes;
+        std::string notes = runtime.notes;
         std::vector<std::pair<int, RuntimePerspectiveGeometry>> perspectivePasses;
         size_t cursor = 0;
         while (cursor < instances.size()) {
-            const int16_t layerIndex = instances[cursor]->layer;
+            const int layerIndex = runtime.objects[instances[cursor]].layer;
             size_t end = cursor + 1;
-            while (end < instances.size() && instances[end]->layer == layerIndex) ++end;
+            while (end < instances.size() &&
+                   runtime.objects[instances[end]].layer == layerIndex) ++end;
             std::fill(layerCanvas.begin(), layerCanvas.end(), 0);
 
             const Layer* layer = (layerIndex >= 0 &&
@@ -332,24 +403,23 @@ void FrameRuntimeRenderer::execute(GameData& game) {
             }
 
             for (size_t n = cursor; n < end; ++n) {
-                const ObjectInstance& inst = *instances[n];
-                auto it = game.frameItems.find(inst.objectInfo);
+                const int stateIndex = instances[n];
+                RuntimeObjectState& objectState = runtime.objects[stateIndex];
+                auto it = game.frameItems.find(objectState.objectInfo);
                 const ObjectInfo* obj = it != game.frameItems.end() ? it->second.get() : nullptr;
                 if (!obj) {
-                    notes += "objInfo " + std::to_string(inst.objectInfo) +
-                             " missing from frame item bank\n";
-                    ++stats.missing;
+                    ++stats.missing; // evaluator already recorded the missing objInfo
                     continue;
                 }
-                if (obj->common && obj->common->flags["DoNotCreateAtStart"]) {
+                if (!objectState.created) {
                     ++stats.noCreate;
                     continue;
                 }
-                if (!runtimeObjectVisibleAtStart(*obj)) {
+                if (!objectState.visible) {
                     ++stats.invisibleObjects;
                     continue;
                 }
-                if (!runtimeLayerVisibleAtStart(frame, inst.layer)) {
+                if (!runtimeLayerVisibleAtStart(frame, objectState.layer)) {
                     ++stats.invisibleLayers;
                     continue;
                 }
@@ -365,9 +435,10 @@ void FrameRuntimeRenderer::execute(GameData& game) {
                 }
 
                 if (isPerspectiveObject(*obj)) {
-                    const auto geometry = runtimePerspectiveGeometry(inst, *obj, W, H);
+                    const auto geometry = runtimePerspectiveGeometry(
+                        objectState.x, objectState.y, *obj, W, H);
                     if (geometry.effect == 0 && geometry.direction == 0) {
-                        perspectivePasses.push_back({inst.layer, geometry});
+                        perspectivePasses.push_back({objectState.layer, geometry});
                     } else {
                         notes += "object '" + obj->name + "' Perspective effect " +
                                  std::to_string(geometry.effect) + " direction " +
@@ -380,14 +451,16 @@ void FrameRuntimeRenderer::execute(GameData& game) {
 
                 if (obj->objectType == kObjQuickBackdrop && obj->quickBackdrop) {
                     const auto& qb = *obj->quickBackdrop;
-                    blendGradient(layerCanvas, W, H, inst.x, inst.y,
-                                  inst.x + qb.width - 1, inst.y + qb.height - 1,
-                                  qb, objectStyle(*obj));
+                    blendGradient(layerCanvas, W, H, objectState.x, objectState.y,
+                                  objectState.x + qb.width - 1,
+                                  objectState.y + qb.height - 1,
+                                  qb, objectStyle(*obj, &objectState));
                     ++stats.quickBackdrops;
                     continue;
                 }
 
-                const int32_t handle = resolveRuntimeStartImage(*obj);
+                const int32_t handle = resolveRuntimeStartImage(
+                    *obj, objectState.animation, objectState.direction);
                 if (handle < 0) {
                     notes += "object '" + obj->name + "' (" +
                              std::string(objectTypeName(obj->objectType)) +
@@ -403,8 +476,22 @@ void FrameRuntimeRenderer::execute(GameData& game) {
                     continue;
                 }
                 if (img->rgba.empty()) img->decode();
+                // v2.98: an animation-chain subject sitting on its SOLID
+                // "empty" frame is the serialized snapshot of an idle chain
+                // (FNAF4's attack placeholders / black flash). The real
+                // runtime shows nothing there until the chain starts it, so
+                // the placeholder is skipped instead of blacking the screen.
+                if (runtime.chainSubjects.count(objectState.objectInfo) &&
+                    isSolidImage(*img)) {
+                    notes += "animation-chain object '" + obj->name +
+                             "' idle at first tick (solid placeholder frame " +
+                             std::to_string(handle) + ")\n";
+                    ++stats.idlePlaceholders;
+                    continue;
+                }
                 runtimeBlendImage(layerCanvas, W, H, *img,
-                                  inst.x - img->hotX, inst.y - img->hotY, *obj);
+                                  objectState.x - img->hotX,
+                                  objectState.y - img->hotY, *obj, &objectState);
                 ++stats.sprites;
             }
 
@@ -438,27 +525,27 @@ void FrameRuntimeRenderer::execute(GameData& game) {
                      "' not executed\n";
             ++stats.customShaders;
         }
-        if (frame.events && !frame.events->groups.empty()) {
-            notes += std::to_string(frame.events->groups.size()) +
-                     " event groups not executed (frame-start view only)\n";
-        }
-
         const std::string base = "frame_" + std::to_string(fi) + "_" +
                                  (frame.name.empty() ? std::string("unnamed")
                                                      : clearName(frame.name));
         PngWriter::writeFile(pathJoin(dir, base + ".png"), W, H, canvas);
 
-        char summary[512];
+        char summary[896];
         std::snprintf(summary, sizeof(summary),
-                      "Frame Runtime Renderer — frame-start only\n"
+                      "Frame Runtime Renderer — frame-start + Start of Frame/always events\n"
                       "frame: %s\noriginal world: %dx%d\nviewport: %dx%d at (0,0)\n"
                       "sprites: %d\nquick backdrops: %d\n"
                       "not created: %d\ninvisible objects: %d\ninstances on invisible layers: %d\n"
-                      "missing object/image: %d\ntext objects not rasterized: %d\ncustom shaders not executed: %d\nPerspective passes applied: %d\n\n",
+                      "missing object/image: %d\ntext objects not rasterized: %d\ncustom shaders not executed: %d\nPerspective passes applied: %d\n"
+                      "idle animation placeholders: %d\n"
+                      "event groups executed: %d\nevent groups false at first tick: %d\nevent groups skipped unsupported: %d\ncounters initialized: %d\n\n",
                       frame.name.c_str(), frame.width, frame.height, W, H,
                       stats.sprites, stats.quickBackdrops, stats.noCreate,
                       stats.invisibleObjects, stats.invisibleLayers, stats.missing,
-                      stats.text, stats.customShaders, stats.perspectivePasses);
+                      stats.text, stats.customShaders, stats.perspectivePasses,
+                      stats.idlePlaceholders,
+                      stats.groupsExecuted, stats.groupsFalse,
+                      stats.groupsSkippedUnsupported, stats.countersInitialized);
         std::string report = summary + notes;
         writeFileBytes(pathJoin(dir, base + ".txt"),
                        std::vector<uint8_t>(report.begin(), report.end()));

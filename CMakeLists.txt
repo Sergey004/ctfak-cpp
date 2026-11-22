@@ -96,6 +96,7 @@ if(NOT CTFAKPP_REPACKER_ONLY)
         src/plugins/FrameLayout.cpp
         src/plugins/FrameReplay.cpp
         src/plugins/FrameRuntime.cpp
+        src/plugins/FrameRuntimeEvents.cpp
         src/plugins/EventsListing.cpp)
 endif()
 
@@ -136,6 +137,7 @@ add_executable(ctfak-tests
     tests/test_reader.cpp
     tests/test_layout.cpp
     tests/test_frame_runtime.cpp
+    tests/test_frame_runtime_events.cpp
     tests/test_events_listing.cpp
 )
 target_link_libraries(ctfak-tests PRIVATE ctfak_core)

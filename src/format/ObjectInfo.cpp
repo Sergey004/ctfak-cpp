@@ -568,9 +568,10 @@ void ObjectCommon::readSubLoaders(BinaryReader& reader, int64_t base) {
         if (counterOffset > 0) {
             reader.seek(base + counterOffset);
             reader.readI16(); // size
-            reader.readI32(); // initial
-            reader.readI32(); // minimum
-            reader.readI32(); // maximum
+            counterInitial = reader.readI32();
+            counterMinimum = reader.readI32();
+            counterMaximum = reader.readI32();
+            hasCounterConfig = true;
         }
     } catch (const ReadError& e) {
         Logger::debug(std::string("ObjectCommon sub-loader stopped: ") + e.what());
