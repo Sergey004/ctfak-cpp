@@ -92,7 +92,12 @@ const char* chunkName(int32_t id) {
         case 26217: return "Music";
         case 32494: return "Fusion 3 Seed";
         case 32639: return "Last Chunk";
-        default: return nullptr;
+        default:
+            // v2.102: an unknown id must NOT be a null pointer - the
+            // callers concatenate the name into a std::string, and a null
+            // char* crashed the tool on the Fusion 2.5 builds (292/293)
+            // that add frame chunks we do not know yet.
+            return "Unknown chunk";
     }
 }
 

@@ -548,6 +548,10 @@ void ctfak::RecompPack::execute(GameData& game) {
         pakName = "sisterlocation.pak";
     else if (low.find("ultimate custom night") != std::string::npos)
         pakName = "ucn.pak";
+    else if (low.find("freddy in space") != std::string::npos)
+        pakName = "fis2.pak";                       // Freddy in Space 2
+    else if (low.find("fury") != std::string::npos)
+        pakName = "furysrage.pak";                  // Fury's Rage
     if (pakName.empty()) {
         for (std::string::const_iterator c = game.name.begin(); c != game.name.end(); ++c) {
             if (*c >= '2' && *c <= '9') { pakName = std::string("fnaf") + *c + ".pak"; break; }
